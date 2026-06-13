@@ -46,6 +46,19 @@ cp .env.example .env         # then fill in your Nightscout URL + token
 uv run pytest                # run the test suite (uses synthetic data, no secrets)
 ```
 
+### Interactive dashboard
+
+```bash
+uv sync --extra ui           # installs Streamlit (optional)
+uv run looptuner ingest --days 30 && uv run looptuner train   # need a dataset + model
+uv run looptuner ui          # opens a local dashboard at http://localhost:8501
+```
+
+The dashboard is local and read-only (no auth, nothing exposed): a scenario simulator
+with live sliders + conformal bands, counterfactual day replay, backtest diagnostics,
+ISF/CR credible-interval ribbons, and the drift monitor. `looptuner charts` renders the
+backtest charts to PNGs without the app.
+
 ### GPU setup (RTX 5070 Ti / Blackwell, sm_120, WSL2)
 
 The GPU is an accelerator, not a requirement — every code path runs on CPU. To use
@@ -84,5 +97,8 @@ Phase 2, building incrementally:
 - [x] Nightly retrain (`train-incremental`) — retrain on full history, promote only
       if it beats the current model on the latest day; versioned checkpoint registry
       with scores + data hash (`checkpoints`)
+- [x] Interactive Streamlit dashboard (`looptuner ui`) — scenario simulator with
+      live sliders + bands, counterfactual replay, backtest diagnostics, ISF/CR
+      ribbons, drift; reusable matplotlib charts (`looptuner charts` → PNGs)
 - [ ] Live polling daemon (optional, behind a flag)
-- [ ] Backtest polish: calibration-plot/worst-miss PNGs + optional LLM narrator
+- [ ] Backtest polish: worst-miss trajectory PNGs + optional LLM narrator

@@ -387,6 +387,52 @@ def inverse(
     console.print(md)
 
 
+@app.command()
+def ui(
+    port: int = typer.Option(8501, help="Port to serve the dashboard on."),
+    headless: bool = typer.Option(False, "--headless", help="Don't auto-open a browser."),
+):
+    """Launch the interactive Streamlit dashboard (local, read-only, no auth)."""
+    import importlib.util
+    import subprocess
+
+    if importlib.util.find_spec("streamlit") is None:
+        console.print("[red]Streamlit not installed. Install the UI extra:[/] uv sync --extra ui")
+        raise typer.Exit(1)
+    spec = importlib.util.find_spec("looptuner.dashboard")
+    script = spec.origin
+    cmd = [
+        "streamlit", "run", script,
+        "--server.port", str(port),
+        "--server.headless", "true" if headless else "false",
+    ]
+    console.print(f"[green]Starting dashboard[/] at http://localhost:{port}  (Ctrl+C to stop)")
+    subprocess.run(cmd, check=False)
+
+
+@app.command()
+def charts():
+    """Render PNG charts (accuracy, calibration, twin quality) from the latest backtest."""
+    from looptuner import plots
+
+    settings = Settings.load()
+    reports = settings.runs_dir / "reports"
+    records = sorted(reports.glob("*_records.parquet"))
+    if not records:
+        console.print("[yellow]No backtest records — run `looptuner backtest` first.[/]")
+        raise typer.Exit(0)
+    df = pd.read_parquet(records[-1])
+    ts = pd.Timestamp.now("UTC").strftime("%Y%m%dT%H%M%S")
+    outputs = {
+        f"charts_{ts}_accuracy.png": plots.fig_accuracy_by_horizon(df),
+        f"charts_{ts}_calibration.png": plots.fig_calibration(df),
+        f"charts_{ts}_twin_quality.png": plots.fig_twin_quality(df),
+    }
+    for name, fig in outputs.items():
+        fig.savefig(reports / name, dpi=120, bbox_inches="tight")
+    console.print(f"[green]Wrote[/] {len(outputs)} charts to {reports}/")
+
+
 @app.command(name="train-incremental")
 def train_incremental_cmd(
     epochs: int = typer.Option(300, help="Training epochs."),

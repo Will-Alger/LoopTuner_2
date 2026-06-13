@@ -25,6 +25,9 @@ dependencies = [
 [project.optional-dependencies]
 narrate = ["anthropic>=0.39"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+ui = [
+    "streamlit>=1.40",
+]
 
 [project.scripts]
 looptuner = "looptuner.cli:app"
