@@ -176,5 +176,98 @@ def evaluate(
     console.print(table)
 
 
+@app.command()
+def backtest(
+    horizons: str = typer.Option(",".join(str(h) for h in DEFAULT_HORIZONS_MIN)),
+    test_days: int = typer.Option(3, help="Most-recent days to walk forward over."),
+    epochs: int = typer.Option(150, help="Epochs per expanding-window retrain."),
+    stride: int = typer.Option(1, help="Anchor stride (1 = every 5-min step)."),
+    seed: int = typer.Option(0),
+):
+    """Walk-forward backtest: predict the past with no future leakage, vs baselines."""
+    from looptuner.backtest import render_markdown_report, run_backtest
+    from looptuner.backtest.report import append_benchmark_log
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    horizons_min = tuple(int(x) for x in horizons.split(","))
+
+    def progress(d, codes):
+        console.print(f"  walk-forward: day {codes.index(d) + 1}/{len(codes)} (retraining)...")
+
+    df, meta = run_backtest(
+        ds, horizons_min=horizons_min, test_days=test_days, epochs=epochs,
+        anchor_stride=stride, seed=seed, progress=progress,
+    )
+    _write_backtest_outputs(settings, df, meta, tag="backtest")
+    append_benchmark_log(settings.runs_dir / "benchmark_log.parquet", df, meta)
+    console.print(render_markdown_report(df, meta))
+
+
+@app.command()
+def shadow(
+    hours: float = typer.Option(24.0, help="Trailing window to health-check."),
+    horizons: str = typer.Option("30,60,120"),
+    epochs: int = typer.Option(200),
+):
+    """Fast daily health-check: backtest only the last N hours against prior history."""
+    from looptuner.backtest import run_backtest
+    from looptuner.backtest.report import append_benchmark_log
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    horizons_min = tuple(int(x) for x in horizons.split(","))
+    df, meta = run_backtest(
+        ds, horizons_min=horizons_min, epochs=epochs, last_hours=hours
+    )
+    _write_backtest_outputs(settings, df, meta, tag="shadow")
+    append_benchmark_log(settings.runs_dir / "benchmark_log.parquet", df, meta)
+    if df.empty:
+        console.print("[yellow]No predictions in the shadow window.[/]")
+        return
+    ref = 120 if 120 in df["horizon_min"].unique() else int(df["horizon_min"].max())
+    sub = df[df["horizon_min"] == ref]
+    worst = sub.loc[sub["abs_err"].idxmax()]
+    console.print(
+        f"[bold]Shadow ({hours:.0f}h)[/]: {ref}min MAPE "
+        f"{sub['pct_err'].mean():.1f}%  RMSE {(sub['signed_err'] ** 2).mean() ** 0.5:.1f}.  "
+        f"Worst miss {worst['timestamp']}: predicted {worst['pred']:.0f}, actual "
+        f"{worst['actual']:.0f} ({worst['signed_err']:+.0f})."
+    )
+
+
+@app.command(name="benchmark-trend")
+def benchmark_trend():
+    """Show twin quality over time from the persistent benchmark log."""
+    settings = Settings.load()
+    log_path = settings.runs_dir / "benchmark_log.parquet"
+    if not log_path.exists():
+        console.print("[yellow]No benchmark log yet — run `backtest` or `shadow` first.[/]")
+        raise typer.Exit(0)
+    log = pd.read_parquet(log_path)
+    table = Table(title="Benchmark trend (per run, per horizon)")
+    for c in ("Run (UTC)", "Mode", "Horizon", "RMSE", "MAPE%", "Cov90%", "n"):
+        table.add_column(c)
+    for _, r in log.sort_values("run_ts").iterrows():
+        table.add_row(
+            str(r["run_ts"])[:19], str(r["mode"]), f"{int(r['horizon_min'])}m",
+            f"{r['rmse']:.1f}", f"{r['mape']:.1f}",
+            f"{r['cov90'] * 100:.0f}" if pd.notna(r["cov90"]) else "—", str(int(r["n"])),
+        )
+    console.print(table)
+
+
+def _write_backtest_outputs(settings: Settings, df: pd.DataFrame, meta: dict, tag: str) -> None:
+    from looptuner.backtest import render_markdown_report
+
+    reports = settings.runs_dir / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    ts = pd.Timestamp.now("UTC").strftime("%Y%m%dT%H%M%S")
+    (reports / f"{tag}_{ts}.md").write_text(render_markdown_report(df, meta))
+    if not df.empty:
+        df.to_parquet(reports / f"{tag}_{ts}_records.parquet")
+    console.print(f"[green]Wrote[/] {reports}/{tag}_{ts}.md")
+
+
 if __name__ == "__main__":
     app()

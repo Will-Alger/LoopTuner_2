@@ -129,6 +129,31 @@ class ForwardSimulator:
         sol = odeint(self.model, g0, t_eval, method=self.solver)
         return sol  # (H+1, B)
 
+    @torch.no_grad()
+    def roll(
+        self,
+        i_act_win: np.ndarray,
+        c_app_win: np.ndarray,
+        start_minute: float,
+        g0: float,
+        dt: float = float(GRID_MINUTES),
+    ) -> np.ndarray:
+        """Integrate a single custom forcing window (used by the anchored backtest).
+
+        ``i_act_win`` / ``c_app_win`` have length H+1 (the forcing over the window,
+        already constructed with no future-leakage). Returns BG of length H+1.
+        """
+        self.model.eval()
+        horizon = len(i_act_win) - 1
+        i_t = torch.as_tensor(np.asarray(i_act_win, np.float32)[:, None], device=self.device)
+        c_t = torch.as_tensor(np.asarray(c_app_win, np.float32)[:, None], device=self.device)
+        sm = torch.as_tensor([float(start_minute)], dtype=torch.float32, device=self.device)
+        self.model.bind(i_t, c_t, sm, dt)
+        t_eval = torch.arange(horizon + 1, dtype=torch.float32, device=self.device) * dt
+        g0t = torch.as_tensor([float(g0)], dtype=torch.float32, device=self.device)
+        sol = odeint(self.model, g0t, t_eval, method=self.solver)
+        return sol.squeeze(-1).cpu().numpy()
+
     # --- window sampling -------------------------------------------------- #
     def _eligible_starts(
         self, forcing: ForcingData, day_codes: set[int], horizon: int
@@ -154,12 +179,56 @@ class ForwardSimulator:
         verbose: bool = False,
     ) -> tuple[ForcingData, TrainResult]:
         forcing = build_forcing(dataset, dataset.profile.dia_hours * 60.0, self.device)
-        horizon = train_horizon_min // GRID_MINUTES
         n_days = len(forcing.days)
         val_days = min(val_days, max(1, n_days - 1))
         val_codes = set(range(n_days - val_days, n_days))
         train_codes = set(range(0, n_days - val_days))
+        result = self._fit_with_codes(
+            forcing, train_codes, val_codes, epochs, train_horizon_min,
+            batch_windows, lr, weight_decay, patience, verbose,
+        )
+        return forcing, result
 
+    def fit_until_day(
+        self,
+        dataset: TidyDataset,
+        train_upto_day: int,
+        epochs: int = 150,
+        train_horizon_min: int = 120,
+        batch_windows: int = 64,
+        lr: float = 0.02,
+        weight_decay: float = 1e-3,
+        patience: int = 40,
+    ) -> tuple[ForcingData, TrainResult]:
+        """Train using ONLY days strictly before ``train_upto_day`` (walk-forward).
+
+        The last available training day is used as validation; no test-day data is
+        ever seen. This is what the backtest calls so the cursor moves forward.
+        """
+        forcing = build_forcing(dataset, dataset.profile.dia_hours * 60.0, self.device)
+        train_upto_day = max(2, min(train_upto_day, len(forcing.days)))
+        val_codes = {train_upto_day - 1}
+        train_codes = set(range(0, train_upto_day - 1)) or {0}
+        result = self._fit_with_codes(
+            forcing, train_codes, val_codes, epochs, train_horizon_min,
+            batch_windows, lr, weight_decay, patience, False,
+        )
+        return forcing, result
+
+    def _fit_with_codes(
+        self,
+        forcing: ForcingData,
+        train_codes: set[int],
+        val_codes: set[int],
+        epochs: int,
+        train_horizon_min: int,
+        batch_windows: int,
+        lr: float,
+        weight_decay: float,
+        patience: int,
+        verbose: bool,
+    ) -> TrainResult:
+        horizon = train_horizon_min // GRID_MINUTES
         train_starts = self._eligible_starts(forcing, train_codes, horizon)
         val_starts = self._eligible_starts(forcing, val_codes, horizon)
         if train_starts.size == 0:
@@ -202,7 +271,7 @@ class ForwardSimulator:
 
         if best_state is not None:
             self.model.load_state_dict(best_state)
-        return forcing, result
+        return result
 
     def _window_loss(self, forcing: ForcingData, starts: np.ndarray, horizon: int) -> Tensor:
         g0 = forcing.bg[torch.as_tensor(starts, device=self.device)]

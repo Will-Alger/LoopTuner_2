@@ -68,7 +68,11 @@ Phase 2, building incrementally:
       at every horizon on both synthetic and real data
 - [x] Train / held-out validation + metrics (MAPE, RMSE, clinical)
 - [x] CLI (`ingest` / `train` / `evaluate`) + reproducible dataset cache & provenance
-- [ ] Backtest / shadow-mode harness (built *before* the inverse problem)
+- [x] Conformal uncertainty for calibrated trajectory bands
+- [x] Backtest / shadow-mode harness (no future-leakage, walk-forward, vs baselines,
+      calibration, error decomposition, worst-miss gallery, per-day score, persistent
+      benchmark log) — `looptuner backtest` / `shadow` / `benchmark-trend`
 - [ ] Counterfactual + scenario simulator
 - [ ] Inverse fit: per-hour ISF(t)/CR(t) with uncertainty
-- [ ] Report generators, drift monitor, live polling daemon, nightly retrain
+- [ ] Backtest polish: calibration-plot/worst-miss PNGs + optional LLM narrator
+- [ ] Drift monitor, live polling daemon, nightly retrain
