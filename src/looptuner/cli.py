@@ -356,6 +356,37 @@ def _print_trajectory(res: dict) -> None:
     console.print(table)
 
 
+@app.command()
+def inverse(
+    models: int = typer.Option(8, help="Ensemble size (leave-one-day-out)."),
+    epochs: int = typer.Option(200, help="Epochs per ensemble member."),
+    coverage: float = typer.Option(0.9, help="Credible-interval coverage."),
+    seed: int = typer.Option(0),
+):
+    """Extract per-hour ISF(t)/CR(t) with credible intervals; write a settings report."""
+    from looptuner.model.inverse import recommendations, run_inverse
+    from looptuner.recommend_report import render_inverse_markdown, write_inverse_json
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+
+    def progress(i, n):
+        console.print(f"  ensemble member {i + 1}/{n} (leave-one-day-out)...")
+
+    result = run_inverse(
+        ds, n_models=models, epochs=epochs, base_seed=seed,
+        coverage_levels=(0.5, coverage), progress=progress,
+    )
+    recs = recommendations(result, coverage=coverage)
+    md = render_inverse_markdown(result, recs, coverage=coverage)
+    reports = settings.runs_dir / "reports"
+    ts = pd.Timestamp.now("UTC").strftime("%Y%m%dT%H%M%S")
+    (reports / f"inverse_{ts}.md").write_text(md)
+    write_inverse_json(result, recs, reports / f"inverse_{ts}.json", coverage=coverage)
+    console.print(f"[green]Wrote[/] {reports}/inverse_{ts}.md (+ .json)")
+    console.print(md)
+
+
 @app.command(name="benchmark-trend")
 def benchmark_trend():
     """Show twin quality over time from the persistent benchmark log."""

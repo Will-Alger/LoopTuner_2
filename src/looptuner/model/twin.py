@@ -229,6 +229,26 @@ class ForwardSimulator:
         )
         return forcing, result
 
+    def fit_days(
+        self,
+        dataset: TidyDataset,
+        train_codes: set[int],
+        val_codes: set[int],
+        epochs: int = 200,
+        train_horizon_min: int = 120,
+        batch_windows: int = 64,
+        lr: float = 0.02,
+        weight_decay: float = 1e-3,
+        patience: int = 40,
+    ) -> tuple[ForcingData, TrainResult]:
+        """Train on an explicit set of day codes (used by the ensemble inverse fit)."""
+        forcing = build_forcing(dataset, dataset.profile.dia_hours * 60.0, self.device)
+        result = self._fit_with_codes(
+            forcing, set(train_codes), set(val_codes), epochs, train_horizon_min,
+            batch_windows, lr, weight_decay, patience, False,
+        )
+        return forcing, result
+
     def _fit_with_codes(
         self,
         forcing: ForcingData,
@@ -297,7 +317,10 @@ class ForwardSimulator:
         mask[0] = False
         if mask.sum() == 0:
             return sol.sum() * 0.0
-        return torch.nn.functional.huber_loss(sol[mask], target[mask], delta=15.0)
+        data_loss = torch.nn.functional.huber_loss(sol[mask], target[mask], delta=15.0)
+        if self.model.training:
+            data_loss = data_loss + self.cfg.level_anchor_weight * self.model.sens.level_penalty()
+        return data_loss
 
     # --- prediction ------------------------------------------------------- #
     @torch.no_grad()

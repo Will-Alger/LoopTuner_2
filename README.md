@@ -75,6 +75,9 @@ Phase 2, building incrementally:
 - [x] Counterfactual replay + interactive scenario simulator (`scenario` /
       `counterfactual`) — same forward model, ISF/CR/basal overrides + added
       bolus/carb, conformal bands, <200ms point path / <2s full forecast
-- [ ] Inverse fit: per-hour ISF(t)/CR(t) with uncertainty
+- [x] Inverse fit: per-hour ISF(t)/CR(t) with credible intervals via a
+      leave-one-day-out ensemble; level anchored to the clinical profile (only the
+      identifiable diurnal *shape* is data-driven), CR gated on carb support.
+      `looptuner inverse` → Markdown + JSON recommendation report.
 - [ ] Backtest polish: calibration-plot/worst-miss PNGs + optional LLM narrator
 - [ ] Drift monitor, live polling daemon, nightly retrain

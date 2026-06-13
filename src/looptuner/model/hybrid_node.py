@@ -45,6 +45,9 @@ class TwinConfig:
     residual_hidden: int = 16
     # Multiplicative bounds keep ISF/CR physiologically sane (vs. profile mean).
     sensitivity_log_clamp: float = 0.8  # exp(+-0.8) ≈ x0.45 .. x2.2
+    # Anchors the day-average ISF/CR level to the clinical profile (learn shape, not
+    # level) — counters ISF/EGP confounding so intervals aren't confidently biased.
+    level_anchor_weight: float = 8.0
 
 
 def _circadian_features(minute_of_day: Tensor, n_harmonics: int) -> Tensor:
@@ -95,6 +98,23 @@ class SensitivityNet(nn.Module):
         mod = hours * 60.0
         with torch.no_grad():
             return self.forward(mod)
+
+    def level_penalty(self) -> Tensor:
+        """Penalize a net day-average shift of ISF/CR away from the profile level.
+
+        Anchors the *level* to the user's clinically-tuned ISF/CR (which is confounded
+        with EGP and not identifiable from CGM alone) while leaving the time-of-day
+        *shape* free to be learned. This is what makes the inverse fit's level honest
+        rather than confidently biased.
+        """
+        device = self.log_isf_mean.device
+        mod = torch.arange(24, dtype=torch.float32, device=device) * 60.0
+        feats = _circadian_features(mod, self.cfg.n_harmonics)
+        delta = self.net(feats)
+        c = self.cfg.sensitivity_log_clamp
+        d_isf = torch.clamp(delta[..., 0], -c, c)
+        d_cr = torch.clamp(delta[..., 1], -c, c)
+        return d_isf.mean() ** 2 + d_cr.mean() ** 2
 
 
 def _interp1d(grid: Tensor, t: Tensor) -> Tensor:
