@@ -142,14 +142,32 @@ class HybridGlucoseODE(nn.Module):
         self._c_app: Tensor | None = None
         self._start_minute: Tensor | None = None
         self._dt: float = 5.0
+        # Optional per-step counterfactual multipliers on ISF(t)/CR(t) (steps, B).
+        self._isf_scale: Tensor | None = None
+        self._cr_scale: Tensor | None = None
 
     # --- bound forcing ----------------------------------------------------- #
-    def bind(self, i_act: Tensor, c_app: Tensor, start_minute: Tensor, dt_min: float) -> None:
-        """Attach the forcing series (steps, B) for the window batch being integrated."""
+    def bind(
+        self,
+        i_act: Tensor,
+        c_app: Tensor,
+        start_minute: Tensor,
+        dt_min: float,
+        isf_scale: Tensor | None = None,
+        cr_scale: Tensor | None = None,
+    ) -> None:
+        """Attach the forcing series (steps, B) for the window batch being integrated.
+
+        ``isf_scale`` / ``cr_scale`` are optional per-step multipliers applied to the
+        learned ISF(t)/CR(t) — this is how counterfactual "what if ISF were 0.8x from
+        4-8am" queries are expressed, without any separate prediction code path.
+        """
         self._i_act = i_act
         self._c_app = c_app
         self._start_minute = start_minute
         self._dt = float(dt_min)
+        self._isf_scale = isf_scale
+        self._cr_scale = cr_scale
 
     @property
     def k(self) -> Tensor:
@@ -166,6 +184,10 @@ class HybridGlucoseODE(nn.Module):
         c_app = _interp1d(self._c_app, idx)  # (B,)
         mod = torch.remainder(self._start_minute + t, MINUTES_PER_DAY)  # (B,)
         isf, cr = self.sens(mod)  # (B,), (B,)
+        if self._isf_scale is not None:
+            isf = isf * _interp1d(self._isf_scale, idx)
+        if self._cr_scale is not None:
+            cr = cr * _interp1d(self._cr_scale, idx)
         dg = self.egp - isf * i_act + (isf / cr) * c_app - self.k * (g - self.gb)
         if self.residual is not None:
             feats = _circadian_features(mod, self.cfg.n_harmonics)  # (B, 2K)

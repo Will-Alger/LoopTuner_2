@@ -72,7 +72,9 @@ Phase 2, building incrementally:
 - [x] Backtest / shadow-mode harness (no future-leakage, walk-forward, vs baselines,
       calibration, error decomposition, worst-miss gallery, per-day score, persistent
       benchmark log) — `looptuner backtest` / `shadow` / `benchmark-trend`
-- [ ] Counterfactual + scenario simulator
+- [x] Counterfactual replay + interactive scenario simulator (`scenario` /
+      `counterfactual`) — same forward model, ISF/CR/basal overrides + added
+      bolus/carb, conformal bands, <200ms point path / <2s full forecast
 - [ ] Inverse fit: per-hour ISF(t)/CR(t) with uncertainty
 - [ ] Backtest polish: calibration-plot/worst-miss PNGs + optional LLM narrator
 - [ ] Drift monitor, live polling daemon, nightly retrain

@@ -236,6 +236,126 @@ def shadow(
     )
 
 
+@app.command()
+def scenario(
+    bolus: float = typer.Option(0.0, help="Hypothetical bolus now (U)."),
+    carbs: float = typer.Option(0.0, help="Hypothetical carbs now (g)."),
+    carb_absorb: float = typer.Option(180.0, help="Carb absorption (min)."),
+    at_offset_min: float = typer.Option(0.0, help="Minutes from now for the input."),
+    isf_scale: float = typer.Option(1.0, help="Multiply ISF over [from_hour,to_hour)."),
+    cr_scale: float = typer.Option(1.0, help="Multiply CR over [from_hour,to_hour)."),
+    from_hour: int = typer.Option(0),
+    to_hour: int = typer.Option(24),
+    basal: float = typer.Option(-1.0, help="Forward basal override U/hr (<0 = keep)."),
+    horizon_min: int = typer.Option(360, help="Forecast horizon (min)."),
+    no_bands: bool = typer.Option(False, "--no-bands", help="Skip conformal bands (faster)."),
+):
+    """Forecast BG for the next 1-6h from the current state under a what-if input."""
+    from looptuner.scenario import (
+        CounterfactualSpec,
+        calibrate_conformal,
+        scenario_forecast,
+        summarize_forecast,
+    )
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    sim = ForwardSimulator.load(str(settings.runs_dir / MODEL_FILE))
+    spec = CounterfactualSpec()
+    if isf_scale != 1.0:
+        spec.with_isf_scale(from_hour, to_hour, isf_scale)
+    if cr_scale != 1.0:
+        spec.with_cr_scale(from_hour, to_hour, cr_scale)
+    if bolus > 0:
+        spec.added_boluses.append((at_offset_min, bolus))
+    if carbs > 0:
+        spec.added_carbs.append((at_offset_min, carbs, carb_absorb))
+    if basal >= 0:
+        import numpy as np
+
+        spec.basal_rate_by_hour = np.full(24, basal)
+
+    conf = None if no_bands else calibrate_conformal(sim, ds)
+    res = scenario_forecast(sim, ds, spec, conformal=conf, horizon_min=horizon_min)
+    s = summarize_forecast(res)
+    console.print(
+        f"[bold]Forecast from {res['anchor_time']} (BG {s['anchor_bg']:.0f})[/]  "
+        f"end {s['end_bg']:.0f}, min {s['min_bg']:.0f}, max {s['max_bg']:.0f}, "
+        f"time<70 {s['frac_below_70']*100:.0f}%, Δ vs no-change {s['delta_vs_baseline_end']:+.0f}"
+    )
+    _print_trajectory(res)
+
+
+@app.command()
+def counterfactual(
+    day: str = typer.Option(None, help="Day to replay (YYYY-MM-DD; default last)."),
+    isf_scale: float = typer.Option(1.0),
+    cr_scale: float = typer.Option(1.0),
+    from_hour: int = typer.Option(0),
+    to_hour: int = typer.Option(24),
+    basal: float = typer.Option(-1.0, help="Basal override U/hr (<0 = keep)."),
+):
+    """Replay a real day under proposed settings vs what actually happened."""
+    import numpy as np
+
+    from looptuner.scenario import CounterfactualSpec, counterfactual_replay
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    sim = ForwardSimulator.load(str(settings.runs_dir / MODEL_FILE))
+    spec = CounterfactualSpec()
+    if isf_scale != 1.0:
+        spec.with_isf_scale(from_hour, to_hour, isf_scale)
+    if cr_scale != 1.0:
+        spec.with_cr_scale(from_hour, to_hour, cr_scale)
+    if basal >= 0:
+        spec.basal_rate_by_hour = np.full(24, basal)
+
+    res = counterfactual_replay(sim, ds, spec, day=day)
+    cf, act = res["counterfactual"], res["actual"]
+    console.print(
+        f"[bold]Counterfactual replay {res['day']}[/]  "
+        f"actual mean {np.nanmean(act):.0f} (TIR {_tir(act)*100:.0f}%) -> "
+        f"counterfactual mean {np.nanmean(cf):.0f} (TIR {_tir(cf)*100:.0f}%)"
+    )
+    table = Table(title="Hourly: actual vs counterfactual BG")
+    for c in ("Time", "Actual", "Counterfactual", "Δ"):
+        table.add_column(c)
+    for i in range(0, len(res["times"]), 12):  # hourly
+        a, c = act[i], cf[i]
+        astr = f"{a:.0f}" if np.isfinite(a) else "—"
+        table.add_row(str(res["times"][i])[11:16], astr, f"{c:.0f}",
+                      f"{c-a:+.0f}" if np.isfinite(a) else "—")
+    console.print(table)
+
+
+def _tir(bg, low=70, high=180):
+    import numpy as np
+
+    b = np.asarray(bg, float)
+    b = b[np.isfinite(b)]
+    return float(np.mean((b >= low) & (b <= high))) if b.size else float("nan")
+
+
+def _print_trajectory(res: dict) -> None:
+
+    table = Table(title="Predicted trajectory")
+    cols = ["Time", "BG"]
+    has_bands = bool(res["bands"])
+    if has_bands:
+        cols += ["90% lo", "90% hi"]
+    for c in cols:
+        table.add_column(c)
+    pt = res["point"]
+    for i in range(0, len(res["times"]), 6):  # every 30 min
+        row = [str(res["times"][i])[11:16], f"{pt[i]:.0f}"]
+        if has_bands and 0.9 in res["bands"]:
+            b = res["bands"][0.9]
+            row += [f"{b['lo'][i]:.0f}", f"{b['hi'][i]:.0f}"]
+        table.add_row(*row)
+    console.print(table)
+
+
 @app.command(name="benchmark-trend")
 def benchmark_trend():
     """Show twin quality over time from the persistent benchmark log."""

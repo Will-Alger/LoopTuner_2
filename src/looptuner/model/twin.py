@@ -137,18 +137,32 @@ class ForwardSimulator:
         start_minute: float,
         g0: float,
         dt: float = float(GRID_MINUTES),
+        isf_scale: np.ndarray | None = None,
+        cr_scale: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Integrate a single custom forcing window (used by the anchored backtest).
+        """Integrate a single custom forcing window (used by backtest and scenarios).
 
         ``i_act_win`` / ``c_app_win`` have length H+1 (the forcing over the window,
-        already constructed with no future-leakage). Returns BG of length H+1.
+        already constructed with no future-leakage). ``isf_scale`` / ``cr_scale`` are
+        optional per-step multipliers for counterfactual ISF/CR overrides. Returns BG
+        of length H+1.
         """
         self.model.eval()
         horizon = len(i_act_win) - 1
         i_t = torch.as_tensor(np.asarray(i_act_win, np.float32)[:, None], device=self.device)
         c_t = torch.as_tensor(np.asarray(c_app_win, np.float32)[:, None], device=self.device)
         sm = torch.as_tensor([float(start_minute)], dtype=torch.float32, device=self.device)
-        self.model.bind(i_t, c_t, sm, dt)
+        isf_t = (
+            torch.as_tensor(np.asarray(isf_scale, np.float32)[:, None], device=self.device)
+            if isf_scale is not None
+            else None
+        )
+        cr_t = (
+            torch.as_tensor(np.asarray(cr_scale, np.float32)[:, None], device=self.device)
+            if cr_scale is not None
+            else None
+        )
+        self.model.bind(i_t, c_t, sm, dt, isf_scale=isf_t, cr_scale=cr_t)
         t_eval = torch.arange(horizon + 1, dtype=torch.float32, device=self.device) * dt
         g0t = torch.as_tensor([float(g0)], dtype=torch.float32, device=self.device)
         sol = odeint(self.model, g0t, t_eval, method=self.solver)
