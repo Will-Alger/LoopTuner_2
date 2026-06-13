@@ -79,5 +79,8 @@ Phase 2, building incrementally:
       leave-one-day-out ensemble; level anchored to the clinical profile (only the
       identifiable diurnal *shape* is data-driven), CR gated on carb support.
       `looptuner inverse` → Markdown + JSON recommendation report.
+- [x] Drift monitor (`drift-report`) — per-hour predicted-vs-actual error over recent
+      days, flagging sudden drops (retrain signal or physiology change)
+- [ ] Nightly retrain (`train-incremental`) with checkpoint versioning
+- [ ] Live polling daemon (optional, behind a flag)
 - [ ] Backtest polish: calibration-plot/worst-miss PNGs + optional LLM narrator
-- [ ] Drift monitor, live polling daemon, nightly retrain

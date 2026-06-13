@@ -387,6 +387,29 @@ def inverse(
     console.print(md)
 
 
+@app.command(name="drift-report")
+def drift_report(
+    horizon_min: int = typer.Option(60, help="Horizon to monitor (min)."),
+    days: int = typer.Option(7, help="Trailing window to check."),
+):
+    """Per-hour predicted-vs-actual error over recent days; flags sudden drops."""
+    from looptuner.drift import compute_drift, render_drift_markdown
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    sim = ForwardSimulator.load(str(settings.runs_dir / MODEL_FILE))
+    with console.status(f"Scoring last {days} days at {horizon_min}min..."):
+        res = compute_drift(ds, sim, horizon_min=horizon_min, days=days)
+    reports = settings.runs_dir / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    ts = pd.Timestamp.now("UTC").strftime("%Y%m%dT%H%M%S")
+    (reports / f"drift_{ts}.md").write_text(render_drift_markdown(res))
+    console.print(render_drift_markdown(res))
+    if res.flags:
+        hrs = ", ".join(f"{f['hour']:02d}:00" for f in res.flags)
+        console.print(f"[yellow]Flagged hours: {hrs}[/]")
+
+
 @app.command(name="benchmark-trend")
 def benchmark_trend():
     """Show twin quality over time from the persistent benchmark log."""
