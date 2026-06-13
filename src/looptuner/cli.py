@@ -614,6 +614,22 @@ def daemon_status():
     console.print(table)
 
 
+@app.command(name="settings-bias")
+def settings_bias():
+    """Observational check: do you systematically go low after meals/corrections/overnight?"""
+    from looptuner.settings_bias import compute_settings_bias, render_settings_bias_markdown
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    res = compute_settings_bias(ds)
+    md = render_settings_bias_markdown(res)
+    reports = settings.runs_dir / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    ts = pd.Timestamp.now("UTC").strftime("%Y%m%dT%H%M%S")
+    (reports / f"settings_bias_{ts}.md").write_text(md)
+    console.print(md)
+
+
 @app.command(name="drift-report")
 def drift_report(
     horizon_min: int = typer.Option(60, help="Horizon to monitor (min)."),

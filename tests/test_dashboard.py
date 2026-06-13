@@ -38,4 +38,4 @@ def test_dashboard_runs_without_exception(app_env):
     assert not at.exception
     # The title renders and at least the scenario metrics are present.
     assert any("LoopTuner" in str(t.value) for t in at.title)
-    assert len(at.tabs) == 5
+    assert len(at.tabs) == 6

@@ -107,4 +107,8 @@ Phase 2, building incrementally:
       the corpus, logs predicted-vs-actual; crash-safe cursor, idempotent, stoppable.
       Never updates weights (that's `train-incremental`'s job).
 
+- [x] Settings-bias report (`settings-bias`) — observational, model-free check for
+      systematic post-meal / post-correction / overnight lows (catches "profile too
+      aggressive", which the level-anchored twin deliberately won't). Dashboard tab too.
+
 **All Phase 2 features from the spec are now implemented.**

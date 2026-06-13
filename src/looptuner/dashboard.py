@@ -79,8 +79,8 @@ def main() -> None:
     c3.metric("Boluses", s["n_boluses"])
     c4.metric("Carb entries", s["n_carb_entries"])
 
-    tab_scn, tab_cf, tab_diag, tab_rec, tab_drift = st.tabs(
-        ["Scenario", "Counterfactual day", "Backtest", "ISF/CR", "Drift"]
+    tab_scn, tab_cf, tab_diag, tab_rec, tab_drift, tab_bias = st.tabs(
+        ["Scenario", "Counterfactual day", "Backtest", "ISF/CR", "Drift", "Settings bias"]
     )
 
     # --- Scenario simulator ------------------------------------------------ #
@@ -195,6 +195,24 @@ def main() -> None:
                 )
             else:
                 st.success("No sudden per-hour accuracy drops — the twin is tracking.")
+
+    # --- Settings bias (observational, model-free) ------------------------- #
+    with tab_bias:
+        st.subheader("Settings-bias check (observational, not the model)")
+        st.caption(
+            "Do you systematically go low after meals/corrections or overnight? Patterns "
+            "to review with your care team — never a dose recommendation."
+        )
+        from looptuner.settings_bias import compute_settings_bias, render_settings_bias_markdown
+
+        res = compute_settings_bias(ds)
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Time in range", f"{res.tir * 100:.0f}%")
+        b2.metric("Below 70", f"{res.tbr_70 * 100:.1f}%")
+        b3.metric("Above 180", f"{res.tar_180 * 100:.0f}%")
+        b4.metric("Overnight drift", f"{res.overnight_drift_mgdl_per_h:+.1f}/h")
+        st.pyplot(plots.fig_settings_bias(res), use_container_width=True)
+        st.markdown(render_settings_bias_markdown(res))
 
 
 main()

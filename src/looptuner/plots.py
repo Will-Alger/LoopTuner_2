@@ -205,6 +205,34 @@ def fig_worst_miss(miss: dict) -> plt.Figure:
     return fig
 
 
+def fig_settings_bias(res) -> plt.Figure:
+    """Time-below-70 by hour + where the lows come from (settings-bias report)."""
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4))
+    hours = np.arange(24)
+    a1.bar(hours, np.nan_to_num(res.tbr_by_hour) * 100, color="#c62828")
+    a1.set_title("Time below 70 by hour")
+    a1.set_xlabel("hour of day")
+    a1.set_ylabel("% of readings < 70")
+    a1.set_xticks(range(0, 24, 3))
+    a1.grid(True, axis="y", alpha=0.25)
+
+    labels = {
+        "post_meal": "after meal",
+        "post_correction": "after correction",
+        "overnight": "overnight",
+        "other": "other",
+    }
+    keys = list(labels)
+    vals = [res.hypo_attribution.get(k, 0.0) * 100 for k in keys]
+    a2.bar([labels[k] for k in keys], vals, color="#ef6c00")
+    a2.set_title("Where the low time comes from")
+    a2.set_ylabel("% of low time")
+    a2.tick_params(axis="x", labelrotation=20)
+    a2.grid(True, axis="y", alpha=0.25)
+    fig.tight_layout()
+    return fig
+
+
 def fig_drift(res: DriftResult) -> plt.Figure:
     """Per-hour recent vs baseline error, with flagged hours highlighted."""
     hours = np.arange(24)
