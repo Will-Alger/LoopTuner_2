@@ -46,6 +46,19 @@ cp .env.example .env         # then fill in your Nightscout URL + token
 uv run pytest                # run the test suite (uses synthetic data, no secrets)
 ```
 
+### Interactive dashboard
+
+```bash
+uv sync --extra ui           # installs Streamlit (optional)
+uv run looptuner ingest --days 30 && uv run looptuner train   # need a dataset + model
+uv run looptuner ui          # opens a local dashboard at http://localhost:8501
+```
+
+The dashboard is local and read-only (no auth, nothing exposed): a scenario simulator
+with live sliders + conformal bands, counterfactual day replay, backtest diagnostics,
+ISF/CR credible-interval ribbons, and the drift monitor. `looptuner charts` renders the
+backtest charts to PNGs without the app.
+
 ### GPU setup (RTX 5070 Ti / Blackwell, sm_120, WSL2)
 
 The GPU is an accelerator, not a requirement — every code path runs on CPU. To use
@@ -72,7 +85,30 @@ Phase 2, building incrementally:
 - [x] Backtest / shadow-mode harness (no future-leakage, walk-forward, vs baselines,
       calibration, error decomposition, worst-miss gallery, per-day score, persistent
       benchmark log) — `looptuner backtest` / `shadow` / `benchmark-trend`
-- [ ] Counterfactual + scenario simulator
-- [ ] Inverse fit: per-hour ISF(t)/CR(t) with uncertainty
-- [ ] Backtest polish: calibration-plot/worst-miss PNGs + optional LLM narrator
-- [ ] Drift monitor, live polling daemon, nightly retrain
+- [x] Counterfactual replay + interactive scenario simulator (`scenario` /
+      `counterfactual`) — same forward model, ISF/CR/basal overrides + added
+      bolus/carb, conformal bands, <200ms point path / <2s full forecast
+- [x] Inverse fit: per-hour ISF(t)/CR(t) with credible intervals via a
+      leave-one-day-out ensemble; level anchored to the clinical profile (only the
+      identifiable diurnal *shape* is data-driven), CR gated on carb support.
+      `looptuner inverse` → Markdown + JSON recommendation report.
+- [x] Drift monitor (`drift-report`) — per-hour predicted-vs-actual error over recent
+      days, flagging sudden drops (retrain signal or physiology change)
+- [x] Nightly retrain (`train-incremental`) — retrain on full history, promote only
+      if it beats the current model on the latest day; versioned checkpoint registry
+      with scores + data hash (`checkpoints`)
+- [x] Interactive Streamlit dashboard (`looptuner ui`) — scenario simulator with
+      live sliders + bands, counterfactual replay, backtest diagnostics, ISF/CR
+      ribbons, drift; reusable matplotlib charts (`looptuner charts` → PNGs)
+- [x] Backtest polish: worst-miss trajectory PNGs (`backtest --gallery`) + optional
+      LLM narrator (`--narrate`, behind a flag — the LLM is a narrator at the end of
+      the pipeline, never the predictor)
+- [x] Live polling daemon (`daemon` / `daemon-status`) — polls Nightscout, appends to
+      the corpus, logs predicted-vs-actual; crash-safe cursor, idempotent, stoppable.
+      Never updates weights (that's `train-incremental`'s job).
+
+- [x] Settings-bias report (`settings-bias`) — observational, model-free check for
+      systematic post-meal / post-correction / overnight lows (catches "profile too
+      aggressive", which the level-anchored twin deliberately won't). Dashboard tab too.
+
+**All Phase 2 features from the spec are now implemented.**

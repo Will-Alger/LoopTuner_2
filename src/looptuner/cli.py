@@ -182,6 +182,11 @@ def backtest(
     test_days: int = typer.Option(3, help="Most-recent days to walk forward over."),
     epochs: int = typer.Option(150, help="Epochs per expanding-window retrain."),
     stride: int = typer.Option(1, help="Anchor stride (1 = every 5-min step)."),
+    gallery: bool = typer.Option(False, "--gallery", help="Render worst-miss trajectory PNGs."),
+    narrate: bool = typer.Option(
+        False, "--narrate", help="LLM one-line cause attribution for worst misses (costs tokens)."
+    ),
+    narrate_model: str = typer.Option("claude-opus-4-8", help="Model for --narrate."),
     seed: int = typer.Option(0),
 ):
     """Walk-forward backtest: predict the past with no future leakage, vs baselines."""
@@ -202,6 +207,51 @@ def backtest(
     _write_backtest_outputs(settings, df, meta, tag="backtest")
     append_benchmark_log(settings.runs_dir / "benchmark_log.parquet", df, meta)
     console.print(render_markdown_report(df, meta))
+    if (gallery or narrate) and not df.empty:
+        _render_gallery(settings, ds, df, narrate=narrate, narrate_model=narrate_model)
+
+
+def _render_gallery(settings, ds, df, narrate: bool, narrate_model: str) -> None:
+    """Render the worst-miss gallery (PNGs) and optional LLM narratives."""
+    from looptuner.backtest.gallery import (
+        narrator_payload,
+        render_gallery_markdown,
+        render_worst_miss_charts,
+        worst_miss_contexts,
+    )
+
+    model_path = settings.runs_dir / MODEL_FILE
+    if not model_path.exists():
+        console.print("[yellow]No saved model for the gallery — run `train` first.[/]")
+        return
+    sim = ForwardSimulator.load(str(model_path))
+    ref = 120 if 120 in df["horizon_min"].unique() else int(df["horizon_min"].max())
+    contexts = worst_miss_contexts(ds, sim, df, horizon_min=ref)
+
+    narratives = None
+    if narrate:
+        from looptuner.narrate import narrate_misses
+
+        with console.status("Narrating worst misses (LLM)..."):
+            narratives = narrate_misses(
+                narrator_payload(contexts), model=narrate_model,
+                api_key=settings.anthropic_api_key,
+            )
+        if not narratives:
+            console.print(
+                "[yellow]Narration unavailable (no ANTHROPIC_API_KEY or anthropic "
+                "extra not installed: uv sync --extra narrate). Charts still rendered.[/]"
+            )
+    out_dir = settings.runs_dir / "reports" / "gallery"
+    paths = render_worst_miss_charts(contexts, out_dir, narratives=narratives)
+    (out_dir / "gallery.md").write_text(
+        render_gallery_markdown(contexts, paths, narratives=narratives)
+    )
+    console.print(f"[green]Wrote[/] {len(paths)} worst-miss charts + gallery.md to {out_dir}/")
+    if narratives:
+        for ctx, nar in zip(contexts, narratives, strict=False):
+            if nar:
+                console.print(f"  [bold]#{ctx['rank']}[/] {ctx['timestamp']}: {nar}")
 
 
 @app.command()
@@ -234,6 +284,373 @@ def shadow(
         f"Worst miss {worst['timestamp']}: predicted {worst['pred']:.0f}, actual "
         f"{worst['actual']:.0f} ({worst['signed_err']:+.0f})."
     )
+
+
+@app.command()
+def scenario(
+    bolus: float = typer.Option(0.0, help="Hypothetical bolus now (U)."),
+    carbs: float = typer.Option(0.0, help="Hypothetical carbs now (g)."),
+    carb_absorb: float = typer.Option(180.0, help="Carb absorption (min)."),
+    at_offset_min: float = typer.Option(0.0, help="Minutes from now for the input."),
+    isf_scale: float = typer.Option(1.0, help="Multiply ISF over [from_hour,to_hour)."),
+    cr_scale: float = typer.Option(1.0, help="Multiply CR over [from_hour,to_hour)."),
+    from_hour: int = typer.Option(0),
+    to_hour: int = typer.Option(24),
+    basal: float = typer.Option(-1.0, help="Forward basal override U/hr (<0 = keep)."),
+    horizon_min: int = typer.Option(360, help="Forecast horizon (min)."),
+    no_bands: bool = typer.Option(False, "--no-bands", help="Skip conformal bands (faster)."),
+):
+    """Forecast BG for the next 1-6h from the current state under a what-if input."""
+    from looptuner.scenario import (
+        CounterfactualSpec,
+        calibrate_conformal,
+        scenario_forecast,
+        summarize_forecast,
+    )
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    sim = ForwardSimulator.load(str(settings.runs_dir / MODEL_FILE))
+    spec = CounterfactualSpec()
+    if isf_scale != 1.0:
+        spec.with_isf_scale(from_hour, to_hour, isf_scale)
+    if cr_scale != 1.0:
+        spec.with_cr_scale(from_hour, to_hour, cr_scale)
+    if bolus > 0:
+        spec.added_boluses.append((at_offset_min, bolus))
+    if carbs > 0:
+        spec.added_carbs.append((at_offset_min, carbs, carb_absorb))
+    if basal >= 0:
+        import numpy as np
+
+        spec.basal_rate_by_hour = np.full(24, basal)
+
+    conf = None if no_bands else calibrate_conformal(sim, ds)
+    res = scenario_forecast(sim, ds, spec, conformal=conf, horizon_min=horizon_min)
+    s = summarize_forecast(res)
+    console.print(
+        f"[bold]Forecast from {res['anchor_time']} (BG {s['anchor_bg']:.0f})[/]  "
+        f"end {s['end_bg']:.0f}, min {s['min_bg']:.0f}, max {s['max_bg']:.0f}, "
+        f"time<70 {s['frac_below_70']*100:.0f}%, Δ vs no-change {s['delta_vs_baseline_end']:+.0f}"
+    )
+    _print_trajectory(res)
+
+
+@app.command()
+def counterfactual(
+    day: str = typer.Option(None, help="Day to replay (YYYY-MM-DD; default last)."),
+    isf_scale: float = typer.Option(1.0),
+    cr_scale: float = typer.Option(1.0),
+    from_hour: int = typer.Option(0),
+    to_hour: int = typer.Option(24),
+    basal: float = typer.Option(-1.0, help="Basal override U/hr (<0 = keep)."),
+):
+    """Replay a real day under proposed settings vs what actually happened."""
+    import numpy as np
+
+    from looptuner.scenario import CounterfactualSpec, counterfactual_replay
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    sim = ForwardSimulator.load(str(settings.runs_dir / MODEL_FILE))
+    spec = CounterfactualSpec()
+    if isf_scale != 1.0:
+        spec.with_isf_scale(from_hour, to_hour, isf_scale)
+    if cr_scale != 1.0:
+        spec.with_cr_scale(from_hour, to_hour, cr_scale)
+    if basal >= 0:
+        spec.basal_rate_by_hour = np.full(24, basal)
+
+    res = counterfactual_replay(sim, ds, spec, day=day)
+    cf, act = res["counterfactual"], res["actual"]
+    console.print(
+        f"[bold]Counterfactual replay {res['day']}[/]  "
+        f"actual mean {np.nanmean(act):.0f} (TIR {_tir(act)*100:.0f}%) -> "
+        f"counterfactual mean {np.nanmean(cf):.0f} (TIR {_tir(cf)*100:.0f}%)"
+    )
+    table = Table(title="Hourly: actual vs counterfactual BG")
+    for c in ("Time", "Actual", "Counterfactual", "Δ"):
+        table.add_column(c)
+    for i in range(0, len(res["times"]), 12):  # hourly
+        a, c = act[i], cf[i]
+        astr = f"{a:.0f}" if np.isfinite(a) else "—"
+        table.add_row(str(res["times"][i])[11:16], astr, f"{c:.0f}",
+                      f"{c-a:+.0f}" if np.isfinite(a) else "—")
+    console.print(table)
+
+
+def _tir(bg, low=70, high=180):
+    import numpy as np
+
+    b = np.asarray(bg, float)
+    b = b[np.isfinite(b)]
+    return float(np.mean((b >= low) & (b <= high))) if b.size else float("nan")
+
+
+def _print_trajectory(res: dict) -> None:
+
+    table = Table(title="Predicted trajectory")
+    cols = ["Time", "BG"]
+    has_bands = bool(res["bands"])
+    if has_bands:
+        cols += ["90% lo", "90% hi"]
+    for c in cols:
+        table.add_column(c)
+    pt = res["point"]
+    for i in range(0, len(res["times"]), 6):  # every 30 min
+        row = [str(res["times"][i])[11:16], f"{pt[i]:.0f}"]
+        if has_bands and 0.9 in res["bands"]:
+            b = res["bands"][0.9]
+            row += [f"{b['lo'][i]:.0f}", f"{b['hi'][i]:.0f}"]
+        table.add_row(*row)
+    console.print(table)
+
+
+@app.command()
+def inverse(
+    models: int = typer.Option(8, help="Ensemble size (leave-one-day-out)."),
+    epochs: int = typer.Option(200, help="Epochs per ensemble member."),
+    coverage: float = typer.Option(0.9, help="Credible-interval coverage."),
+    seed: int = typer.Option(0),
+):
+    """Extract per-hour ISF(t)/CR(t) with credible intervals; write a settings report."""
+    from looptuner.model.inverse import recommendations, run_inverse
+    from looptuner.recommend_report import render_inverse_markdown, write_inverse_json
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+
+    def progress(i, n):
+        console.print(f"  ensemble member {i + 1}/{n} (leave-one-day-out)...")
+
+    result = run_inverse(
+        ds, n_models=models, epochs=epochs, base_seed=seed,
+        coverage_levels=(0.5, coverage), progress=progress,
+    )
+    recs = recommendations(result, coverage=coverage)
+    md = render_inverse_markdown(result, recs, coverage=coverage)
+    reports = settings.runs_dir / "reports"
+    ts = pd.Timestamp.now("UTC").strftime("%Y%m%dT%H%M%S")
+    (reports / f"inverse_{ts}.md").write_text(md)
+    write_inverse_json(result, recs, reports / f"inverse_{ts}.json", coverage=coverage)
+    console.print(f"[green]Wrote[/] {reports}/inverse_{ts}.md (+ .json)")
+    console.print(md)
+
+
+@app.command()
+def ui(
+    port: int = typer.Option(8501, help="Port to serve the dashboard on."),
+    headless: bool = typer.Option(False, "--headless", help="Don't auto-open a browser."),
+):
+    """Launch the interactive Streamlit dashboard (local, read-only, no auth)."""
+    import importlib.util
+    import subprocess
+
+    if importlib.util.find_spec("streamlit") is None:
+        console.print("[red]Streamlit not installed. Install the UI extra:[/] uv sync --extra ui")
+        raise typer.Exit(1)
+    spec = importlib.util.find_spec("looptuner.dashboard")
+    script = spec.origin
+    cmd = [
+        "streamlit", "run", script,
+        "--server.port", str(port),
+        "--server.headless", "true" if headless else "false",
+    ]
+    console.print(f"[green]Starting dashboard[/] at http://localhost:{port}  (Ctrl+C to stop)")
+    subprocess.run(cmd, check=False)
+
+
+@app.command()
+def charts():
+    """Render PNG charts (accuracy, calibration, twin quality) from the latest backtest."""
+    from looptuner import plots
+
+    settings = Settings.load()
+    reports = settings.runs_dir / "reports"
+    records = sorted(reports.glob("*_records.parquet"))
+    if not records:
+        console.print("[yellow]No backtest records — run `looptuner backtest` first.[/]")
+        raise typer.Exit(0)
+    df = pd.read_parquet(records[-1])
+    ts = pd.Timestamp.now("UTC").strftime("%Y%m%dT%H%M%S")
+    outputs = {
+        f"charts_{ts}_accuracy.png": plots.fig_accuracy_by_horizon(df),
+        f"charts_{ts}_calibration.png": plots.fig_calibration(df),
+        f"charts_{ts}_twin_quality.png": plots.fig_twin_quality(df),
+    }
+    for name, fig in outputs.items():
+        fig.savefig(reports / name, dpi=120, bbox_inches="tight")
+    console.print(f"[green]Wrote[/] {len(outputs)} charts to {reports}/")
+
+
+@app.command(name="train-incremental")
+def train_incremental_cmd(
+    epochs: int = typer.Option(300, help="Training epochs."),
+    horizon_min: int = typer.Option(60, help="Validation horizon (min)."),
+    seed: int = typer.Option(0),
+):
+    """Retrain on full history; promote only if it beats the current model (latest day)."""
+    from looptuner.incremental import train_incremental
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    with console.status(f"Retraining on {ds.coverage_days():.1f} days..."):
+        res = train_incremental(
+            ds, settings.runs_dir, epochs=epochs, horizon_min=horizon_min, seed=seed
+        )
+    prev = "—" if res.previous_score != res.previous_score else f"{res.previous_score:.1f}"
+    verdict = (
+        "[green]promoted to current[/]" if res.promoted else "[yellow]kept previous current[/]"
+    )
+    console.print(
+        f"New model {horizon_min}min MAPE {res.new_score:.1f}% (previous {prev}%) -> {verdict}\n"
+        f"checkpoint: {res.new_checkpoint}"
+    )
+
+
+@app.command()
+def checkpoints():
+    """List tracked model checkpoints and their validation scores."""
+    from looptuner.incremental import load_registry
+
+    settings = Settings.load()
+    registry = load_registry(settings.runs_dir)
+    if not registry:
+        console.print("[yellow]No checkpoints yet — run `train-incremental`.[/]")
+        raise typer.Exit(0)
+    table = Table(title="Checkpoint registry")
+    for c in ("Timestamp", "Val MAPE%", "Prev", "Promoted", "Days", "Data hash"):
+        table.add_column(c)
+    for e in registry:
+        table.add_row(
+            e["timestamp"], str(e["val_score_mape"]),
+            str(e.get("previous_score_mape", "—")), "yes" if e["promoted"] else "no",
+            str(e["n_days"]), e["data_hash"],
+        )
+    console.print(table)
+
+
+@app.command()
+def daemon(
+    interval_min: float = typer.Option(5.0, help="Polling interval (minutes)."),
+    horizons: str = typer.Option("30,60", help="Forecast horizons to log (min)."),
+    backfill_days: int = typer.Option(7, help="Days to backfill on first run."),
+    max_polls: int = typer.Option(0, help="Stop after N polls (0 = run until Ctrl+C)."),
+):
+    """Poll Nightscout, append to the corpus, log predicted-vs-actual. No weight updates."""
+    from looptuner.daemon import DaemonPaths, run_daemon
+    from looptuner.scenario import calibrate_conformal
+
+    settings = Settings.load()
+    if not settings.nightscout_url:
+        console.print("[red]NIGHTSCOUT_URL not set — fill in .env first.[/]")
+        raise typer.Exit(1)
+    model_path = settings.runs_dir / MODEL_FILE
+    if not model_path.exists():
+        console.print("[red]No trained model — run `train` first.[/]")
+        raise typer.Exit(1)
+
+    from looptuner.ingest.nightscout import NightscoutClient
+
+    client = NightscoutClient(
+        settings.nightscout_url, token=settings.nightscout_token,
+        api_secret=settings.nightscout_api_secret,
+    )
+    sim = ForwardSimulator.load(str(model_path))
+    paths = DaemonPaths(settings.data_dir, settings.runs_dir)
+
+    # Calibrate conformal once from the existing cached dataset, if present.
+    conformal = None
+    try:
+        conformal = calibrate_conformal(sim, load_dataset(paths.dataset))
+    except Exception:
+        pass
+
+    horizons_min = tuple(int(x) for x in horizons.split(","))
+    console.print(
+        f"[green]Daemon started[/] (every {interval_min:g} min). "
+        "Collecting data + logging predictions; weights are NOT updated. Ctrl+C to stop."
+    )
+
+    def on_poll(s):
+        if "error" in s:
+            console.print(f"[yellow]poll error:[/] {s['error']}")
+        else:
+            console.print(
+                f"  {s['now'][:19]}  +{s['new_entries']}cgm/+{s['new_treatments']}tx  "
+                f"corpus {s['corpus_days']}d  resolved {s['resolved']}  pending {s['pending']}"
+            )
+
+    run_daemon(
+        client, sim, paths, interval_min=interval_min, horizons_min=horizons_min,
+        conformal=conformal, backfill_days=backfill_days,
+        max_polls=max_polls or None, on_poll=on_poll,
+    )
+    client.close()
+    console.print("[green]Daemon stopped.[/] State persisted; safe to resume anytime.")
+
+
+@app.command(name="daemon-status")
+def daemon_status():
+    """Summarize the daemon's predicted-vs-actual log."""
+    import numpy as np
+
+    settings = Settings.load()
+    from looptuner.daemon import DaemonPaths
+
+    paths = DaemonPaths(settings.data_dir, settings.runs_dir)
+    if not paths.predictions.exists():
+        console.print("[yellow]No live predictions yet — run `daemon` first.[/]")
+        raise typer.Exit(0)
+    df = pd.read_parquet(paths.predictions)
+    table = Table(title=f"Live predicted-vs-actual ({len(df)} resolved)")
+    for c in ("Horizon", "n", "MAPE%", "RMSE", "90% coverage"):
+        table.add_column(c)
+    for h, g in df.groupby("horizon_min"):
+        mape = float((g["abs_err"] / g["actual"].clip(lower=1) * 100).mean())
+        rmse = float(np.sqrt(((g["pred"] - g["actual"]) ** 2).mean()))
+        cov = float(g["in90"].mean()) * 100
+        table.add_row(f"{int(h)}m", str(len(g)), f"{mape:.1f}", f"{rmse:.1f}", f"{cov:.0f}%")
+    console.print(table)
+
+
+@app.command(name="settings-bias")
+def settings_bias():
+    """Observational check: do you systematically go low after meals/corrections/overnight?"""
+    from looptuner.settings_bias import compute_settings_bias, render_settings_bias_markdown
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    res = compute_settings_bias(ds)
+    md = render_settings_bias_markdown(res)
+    reports = settings.runs_dir / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    ts = pd.Timestamp.now("UTC").strftime("%Y%m%dT%H%M%S")
+    (reports / f"settings_bias_{ts}.md").write_text(md)
+    console.print(md)
+
+
+@app.command(name="drift-report")
+def drift_report(
+    horizon_min: int = typer.Option(60, help="Horizon to monitor (min)."),
+    days: int = typer.Option(7, help="Trailing window to check."),
+):
+    """Per-hour predicted-vs-actual error over recent days; flags sudden drops."""
+    from looptuner.drift import compute_drift, render_drift_markdown
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    sim = ForwardSimulator.load(str(settings.runs_dir / MODEL_FILE))
+    with console.status(f"Scoring last {days} days at {horizon_min}min..."):
+        res = compute_drift(ds, sim, horizon_min=horizon_min, days=days)
+    reports = settings.runs_dir / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    ts = pd.Timestamp.now("UTC").strftime("%Y%m%dT%H%M%S")
+    (reports / f"drift_{ts}.md").write_text(render_drift_markdown(res))
+    console.print(render_drift_markdown(res))
+    if res.flags:
+        hrs = ", ".join(f"{f['hour']:02d}:00" for f in res.flags)
+        console.print(f"[yellow]Flagged hours: {hrs}[/]")
 
 
 @app.command(name="benchmark-trend")

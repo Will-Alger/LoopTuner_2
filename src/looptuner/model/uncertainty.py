@@ -56,6 +56,16 @@ class ConformalCalibrator:
         nearest = min(self.quantiles, key=lambda h: abs(h - horizon_min))
         return self.quantiles[nearest].get(coverage, float("nan"))
 
+    def half_width_at(self, minute: float, coverage: float) -> float:
+        """Half-width at an arbitrary horizon (minutes), linearly interpolated across
+        calibrated horizons — used to band a full scenario trajectory, not just the
+        calibrated grid points."""
+        if not self.quantiles:
+            return float("nan")
+        hs = sorted(self.quantiles)
+        ws = [self.quantiles[h].get(coverage, float("nan")) for h in hs]
+        return float(np.interp(minute, hs, ws, left=ws[0], right=ws[-1]))
+
     def interval(self, pred: float, horizon_min: int, coverage: float) -> tuple[float, float]:
         w = self.half_width(horizon_min, coverage)
         return (pred - w, pred + w)

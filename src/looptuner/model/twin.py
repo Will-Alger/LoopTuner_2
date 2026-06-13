@@ -137,18 +137,32 @@ class ForwardSimulator:
         start_minute: float,
         g0: float,
         dt: float = float(GRID_MINUTES),
+        isf_scale: np.ndarray | None = None,
+        cr_scale: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Integrate a single custom forcing window (used by the anchored backtest).
+        """Integrate a single custom forcing window (used by backtest and scenarios).
 
         ``i_act_win`` / ``c_app_win`` have length H+1 (the forcing over the window,
-        already constructed with no future-leakage). Returns BG of length H+1.
+        already constructed with no future-leakage). ``isf_scale`` / ``cr_scale`` are
+        optional per-step multipliers for counterfactual ISF/CR overrides. Returns BG
+        of length H+1.
         """
         self.model.eval()
         horizon = len(i_act_win) - 1
         i_t = torch.as_tensor(np.asarray(i_act_win, np.float32)[:, None], device=self.device)
         c_t = torch.as_tensor(np.asarray(c_app_win, np.float32)[:, None], device=self.device)
         sm = torch.as_tensor([float(start_minute)], dtype=torch.float32, device=self.device)
-        self.model.bind(i_t, c_t, sm, dt)
+        isf_t = (
+            torch.as_tensor(np.asarray(isf_scale, np.float32)[:, None], device=self.device)
+            if isf_scale is not None
+            else None
+        )
+        cr_t = (
+            torch.as_tensor(np.asarray(cr_scale, np.float32)[:, None], device=self.device)
+            if cr_scale is not None
+            else None
+        )
+        self.model.bind(i_t, c_t, sm, dt, isf_scale=isf_t, cr_scale=cr_t)
         t_eval = torch.arange(horizon + 1, dtype=torch.float32, device=self.device) * dt
         g0t = torch.as_tensor([float(g0)], dtype=torch.float32, device=self.device)
         sol = odeint(self.model, g0t, t_eval, method=self.solver)
@@ -211,6 +225,26 @@ class ForwardSimulator:
         train_codes = set(range(0, train_upto_day - 1)) or {0}
         result = self._fit_with_codes(
             forcing, train_codes, val_codes, epochs, train_horizon_min,
+            batch_windows, lr, weight_decay, patience, False,
+        )
+        return forcing, result
+
+    def fit_days(
+        self,
+        dataset: TidyDataset,
+        train_codes: set[int],
+        val_codes: set[int],
+        epochs: int = 200,
+        train_horizon_min: int = 120,
+        batch_windows: int = 64,
+        lr: float = 0.02,
+        weight_decay: float = 1e-3,
+        patience: int = 40,
+    ) -> tuple[ForcingData, TrainResult]:
+        """Train on an explicit set of day codes (used by the ensemble inverse fit)."""
+        forcing = build_forcing(dataset, dataset.profile.dia_hours * 60.0, self.device)
+        result = self._fit_with_codes(
+            forcing, set(train_codes), set(val_codes), epochs, train_horizon_min,
             batch_windows, lr, weight_decay, patience, False,
         )
         return forcing, result
@@ -283,7 +317,10 @@ class ForwardSimulator:
         mask[0] = False
         if mask.sum() == 0:
             return sol.sum() * 0.0
-        return torch.nn.functional.huber_loss(sol[mask], target[mask], delta=15.0)
+        data_loss = torch.nn.functional.huber_loss(sol[mask], target[mask], delta=15.0)
+        if self.model.training:
+            data_loss = data_loss + self.cfg.level_anchor_weight * self.model.sens.level_penalty()
+        return data_loss
 
     # --- prediction ------------------------------------------------------- #
     @torch.no_grad()

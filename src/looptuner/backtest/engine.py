@@ -33,6 +33,7 @@ class BacktestArrays:
 
     bg: np.ndarray
     delivery: np.ndarray  # actual insulin delivered per step (bolus + basal)
+    bolus: np.ndarray  # actual bolus insulin per step (for basal-override replays)
     scheduled_basal: np.ndarray  # scheduled basal insulin per step (for forward assumption)
     carbs: np.ndarray
     absorptions: np.ndarray
@@ -49,7 +50,8 @@ class BacktestArrays:
     def from_dataset(cls, dataset: TidyDataset) -> BacktestArrays:
         frame = dataset.frame
         n = len(frame)
-        delivery = frame["bolus"].to_numpy() + frame["basal_insulin"].to_numpy()
+        bolus = frame["bolus"].to_numpy().astype(float)
+        delivery = bolus + frame["basal_insulin"].to_numpy()
         carbs = frame["carbs"].to_numpy().astype(float)
         absorptions = np.full(n, 180.0)
         for c in dataset.carbs:
@@ -73,6 +75,7 @@ class BacktestArrays:
         return cls(
             bg=frame["bg"].to_numpy().astype(float),
             delivery=delivery,
+            bolus=bolus,
             scheduled_basal=scheduled_basal,
             carbs=carbs,
             absorptions=absorptions,

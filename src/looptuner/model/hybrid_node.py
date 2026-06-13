@@ -45,6 +45,9 @@ class TwinConfig:
     residual_hidden: int = 16
     # Multiplicative bounds keep ISF/CR physiologically sane (vs. profile mean).
     sensitivity_log_clamp: float = 0.8  # exp(+-0.8) ≈ x0.45 .. x2.2
+    # Anchors the day-average ISF/CR level to the clinical profile (learn shape, not
+    # level) — counters ISF/EGP confounding so intervals aren't confidently biased.
+    level_anchor_weight: float = 8.0
 
 
 def _circadian_features(minute_of_day: Tensor, n_harmonics: int) -> Tensor:
@@ -96,6 +99,23 @@ class SensitivityNet(nn.Module):
         with torch.no_grad():
             return self.forward(mod)
 
+    def level_penalty(self) -> Tensor:
+        """Penalize a net day-average shift of ISF/CR away from the profile level.
+
+        Anchors the *level* to the user's clinically-tuned ISF/CR (which is confounded
+        with EGP and not identifiable from CGM alone) while leaving the time-of-day
+        *shape* free to be learned. This is what makes the inverse fit's level honest
+        rather than confidently biased.
+        """
+        device = self.log_isf_mean.device
+        mod = torch.arange(24, dtype=torch.float32, device=device) * 60.0
+        feats = _circadian_features(mod, self.cfg.n_harmonics)
+        delta = self.net(feats)
+        c = self.cfg.sensitivity_log_clamp
+        d_isf = torch.clamp(delta[..., 0], -c, c)
+        d_cr = torch.clamp(delta[..., 1], -c, c)
+        return d_isf.mean() ** 2 + d_cr.mean() ** 2
+
 
 def _interp1d(grid: Tensor, t: Tensor) -> Tensor:
     """Linear interpolation of a 1-D ``grid`` (sampled every step) at fractional index ``t``.
@@ -142,14 +162,32 @@ class HybridGlucoseODE(nn.Module):
         self._c_app: Tensor | None = None
         self._start_minute: Tensor | None = None
         self._dt: float = 5.0
+        # Optional per-step counterfactual multipliers on ISF(t)/CR(t) (steps, B).
+        self._isf_scale: Tensor | None = None
+        self._cr_scale: Tensor | None = None
 
     # --- bound forcing ----------------------------------------------------- #
-    def bind(self, i_act: Tensor, c_app: Tensor, start_minute: Tensor, dt_min: float) -> None:
-        """Attach the forcing series (steps, B) for the window batch being integrated."""
+    def bind(
+        self,
+        i_act: Tensor,
+        c_app: Tensor,
+        start_minute: Tensor,
+        dt_min: float,
+        isf_scale: Tensor | None = None,
+        cr_scale: Tensor | None = None,
+    ) -> None:
+        """Attach the forcing series (steps, B) for the window batch being integrated.
+
+        ``isf_scale`` / ``cr_scale`` are optional per-step multipliers applied to the
+        learned ISF(t)/CR(t) — this is how counterfactual "what if ISF were 0.8x from
+        4-8am" queries are expressed, without any separate prediction code path.
+        """
         self._i_act = i_act
         self._c_app = c_app
         self._start_minute = start_minute
         self._dt = float(dt_min)
+        self._isf_scale = isf_scale
+        self._cr_scale = cr_scale
 
     @property
     def k(self) -> Tensor:
@@ -166,6 +204,10 @@ class HybridGlucoseODE(nn.Module):
         c_app = _interp1d(self._c_app, idx)  # (B,)
         mod = torch.remainder(self._start_minute + t, MINUTES_PER_DAY)  # (B,)
         isf, cr = self.sens(mod)  # (B,), (B,)
+        if self._isf_scale is not None:
+            isf = isf * _interp1d(self._isf_scale, idx)
+        if self._cr_scale is not None:
+            cr = cr * _interp1d(self._cr_scale, idx)
         dg = self.egp - isf * i_act + (isf / cr) * c_app - self.k * (g - self.gb)
         if self.residual is not None:
             feats = _circadian_features(mod, self.cfg.n_harmonics)  # (B, 2K)
