@@ -100,5 +100,7 @@ Phase 2, building incrementally:
 - [x] Interactive Streamlit dashboard (`looptuner ui`) — scenario simulator with
       live sliders + bands, counterfactual replay, backtest diagnostics, ISF/CR
       ribbons, drift; reusable matplotlib charts (`looptuner charts` → PNGs)
+- [x] Backtest polish: worst-miss trajectory PNGs (`backtest --gallery`) + optional
+      LLM narrator (`--narrate`, behind a flag — the LLM is a narrator at the end of
+      the pipeline, never the predictor)
 - [ ] Live polling daemon (optional, behind a flag)
-- [ ] Backtest polish: worst-miss trajectory PNGs + optional LLM narrator

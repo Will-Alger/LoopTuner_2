@@ -172,6 +172,39 @@ def fig_twin_quality(df: pd.DataFrame, ref_horizon_min: int = 120) -> plt.Figure
     return fig
 
 
+def fig_worst_miss(miss: dict) -> plt.Figure:
+    """A single worst-miss chart: predicted trajectory vs actual CGM with inputs marked.
+
+    ``miss`` carries plain arrays (built by backtest.gallery): actual_times/actual_bg
+    over a context window, pred_times/pred_bg from the anchor forward, bolus/carb marks,
+    a title, and an optional narrative string.
+    """
+    fig, ax = plt.subplots(figsize=(8, 4))
+    _style_bg_axis(ax)
+    at = [pd.Timestamp(t) for t in miss["actual_times"]]
+    pt = [pd.Timestamp(t) for t in miss["pred_times"]]
+    ax.plot(at, miss["actual_bg"], color="#263238", lw=1.8, label="actual")
+    ax.plot(pt, miss["pred_bg"], color="#c62828", lw=2.0, ls="--", label="twin prediction")
+    ax.axvline(pt[0], color="#1565c0", lw=1.0, alpha=0.6)
+    ax.annotate("anchor", (pt[0], ax.get_ylim()[1]), fontsize=7, color="#1565c0",
+                va="top", ha="left")
+    for t, u in miss.get("bolus_marks", []):
+        ax.annotate(f"{u:.1f}U", (pd.Timestamp(t), 60), fontsize=7, color="#6a1b9a",
+                    ha="center", rotation=90)
+    for t, g in miss.get("carb_marks", []):
+        ax.annotate(f"{g:.0f}g", (pd.Timestamp(t), 70), fontsize=7, color="#2e7d32",
+                    ha="center", rotation=90)
+    ax.set_title(miss.get("title", "Worst miss"))
+    ax.set_xlabel("time")
+    fig.autofmt_xdate()
+    ax.legend(loc="best", fontsize=8)
+    if miss.get("narrative"):
+        fig.text(0.5, -0.02, miss["narrative"], ha="center", fontsize=8,
+                 wrap=True, style="italic")
+    fig.tight_layout()
+    return fig
+
+
 def fig_drift(res: DriftResult) -> plt.Figure:
     """Per-hour recent vs baseline error, with flagged hours highlighted."""
     hours = np.arange(24)

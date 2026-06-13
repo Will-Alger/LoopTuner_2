@@ -182,6 +182,11 @@ def backtest(
     test_days: int = typer.Option(3, help="Most-recent days to walk forward over."),
     epochs: int = typer.Option(150, help="Epochs per expanding-window retrain."),
     stride: int = typer.Option(1, help="Anchor stride (1 = every 5-min step)."),
+    gallery: bool = typer.Option(False, "--gallery", help="Render worst-miss trajectory PNGs."),
+    narrate: bool = typer.Option(
+        False, "--narrate", help="LLM one-line cause attribution for worst misses (costs tokens)."
+    ),
+    narrate_model: str = typer.Option("claude-opus-4-8", help="Model for --narrate."),
     seed: int = typer.Option(0),
 ):
     """Walk-forward backtest: predict the past with no future leakage, vs baselines."""
@@ -202,6 +207,51 @@ def backtest(
     _write_backtest_outputs(settings, df, meta, tag="backtest")
     append_benchmark_log(settings.runs_dir / "benchmark_log.parquet", df, meta)
     console.print(render_markdown_report(df, meta))
+    if (gallery or narrate) and not df.empty:
+        _render_gallery(settings, ds, df, narrate=narrate, narrate_model=narrate_model)
+
+
+def _render_gallery(settings, ds, df, narrate: bool, narrate_model: str) -> None:
+    """Render the worst-miss gallery (PNGs) and optional LLM narratives."""
+    from looptuner.backtest.gallery import (
+        narrator_payload,
+        render_gallery_markdown,
+        render_worst_miss_charts,
+        worst_miss_contexts,
+    )
+
+    model_path = settings.runs_dir / MODEL_FILE
+    if not model_path.exists():
+        console.print("[yellow]No saved model for the gallery — run `train` first.[/]")
+        return
+    sim = ForwardSimulator.load(str(model_path))
+    ref = 120 if 120 in df["horizon_min"].unique() else int(df["horizon_min"].max())
+    contexts = worst_miss_contexts(ds, sim, df, horizon_min=ref)
+
+    narratives = None
+    if narrate:
+        from looptuner.narrate import narrate_misses
+
+        with console.status("Narrating worst misses (LLM)..."):
+            narratives = narrate_misses(
+                narrator_payload(contexts), model=narrate_model,
+                api_key=settings.anthropic_api_key,
+            )
+        if not narratives:
+            console.print(
+                "[yellow]Narration unavailable (no ANTHROPIC_API_KEY or anthropic "
+                "extra not installed: uv sync --extra narrate). Charts still rendered.[/]"
+            )
+    out_dir = settings.runs_dir / "reports" / "gallery"
+    paths = render_worst_miss_charts(contexts, out_dir, narratives=narratives)
+    (out_dir / "gallery.md").write_text(
+        render_gallery_markdown(contexts, paths, narratives=narratives)
+    )
+    console.print(f"[green]Wrote[/] {len(paths)} worst-miss charts + gallery.md to {out_dir}/")
+    if narratives:
+        for ctx, nar in zip(contexts, narratives, strict=False):
+            if nar:
+                console.print(f"  [bold]#{ctx['rank']}[/] {ctx['timestamp']}: {nar}")
 
 
 @app.command()
