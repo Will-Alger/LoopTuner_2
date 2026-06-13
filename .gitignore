@@ -1,0 +1,43 @@
+# Secrets — never commit (constraint: .env gitignored from commit 0)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# uv
+uv.lock.bak
+
+# Data / model artifacts (large, reproducible from source + config)
+data/
+runs/
+checkpoints/
+*.pt
+*.ckpt
+*.parquet
+*.sqlite
+*.db
+reports/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
