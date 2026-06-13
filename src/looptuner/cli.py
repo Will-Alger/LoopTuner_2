@@ -387,6 +387,53 @@ def inverse(
     console.print(md)
 
 
+@app.command(name="train-incremental")
+def train_incremental_cmd(
+    epochs: int = typer.Option(300, help="Training epochs."),
+    horizon_min: int = typer.Option(60, help="Validation horizon (min)."),
+    seed: int = typer.Option(0),
+):
+    """Retrain on full history; promote only if it beats the current model (latest day)."""
+    from looptuner.incremental import train_incremental
+
+    settings = Settings.load()
+    ds = load_dataset(_dataset_path(settings))
+    with console.status(f"Retraining on {ds.coverage_days():.1f} days..."):
+        res = train_incremental(
+            ds, settings.runs_dir, epochs=epochs, horizon_min=horizon_min, seed=seed
+        )
+    prev = "—" if res.previous_score != res.previous_score else f"{res.previous_score:.1f}"
+    verdict = (
+        "[green]promoted to current[/]" if res.promoted else "[yellow]kept previous current[/]"
+    )
+    console.print(
+        f"New model {horizon_min}min MAPE {res.new_score:.1f}% (previous {prev}%) -> {verdict}\n"
+        f"checkpoint: {res.new_checkpoint}"
+    )
+
+
+@app.command()
+def checkpoints():
+    """List tracked model checkpoints and their validation scores."""
+    from looptuner.incremental import load_registry
+
+    settings = Settings.load()
+    registry = load_registry(settings.runs_dir)
+    if not registry:
+        console.print("[yellow]No checkpoints yet — run `train-incremental`.[/]")
+        raise typer.Exit(0)
+    table = Table(title="Checkpoint registry")
+    for c in ("Timestamp", "Val MAPE%", "Prev", "Promoted", "Days", "Data hash"):
+        table.add_column(c)
+    for e in registry:
+        table.add_row(
+            e["timestamp"], str(e["val_score_mape"]),
+            str(e.get("previous_score_mape", "—")), "yes" if e["promoted"] else "no",
+            str(e["n_days"]), e["data_hash"],
+        )
+    console.print(table)
+
+
 @app.command(name="drift-report")
 def drift_report(
     horizon_min: int = typer.Option(60, help="Horizon to monitor (min)."),
