@@ -64,8 +64,9 @@ under JAX/XLA (PTX-JIT issues), which is why this project uses PyTorch/torchdiff
 Phase 2, building incrementally:
 
 - [x] Nightscout ingestion → tidy time-series (+ synthetic generator for testing)
-- [ ] Forward simulator (hybrid Neural ODE)
-- [ ] Train / held-out validation + metrics (MAPE, RMSE, clinical)
+- [x] Forward simulator (hybrid Neural ODE) — beats persistence & linear baselines
+      at every horizon on both synthetic and real data
+- [x] Train / held-out validation + metrics (MAPE, RMSE, clinical)
 - [ ] Backtest / shadow-mode harness (built *before* the inverse problem)
 - [ ] Counterfactual + scenario simulator
 - [ ] Inverse fit: per-hour ISF(t)/CR(t) with uncertainty
