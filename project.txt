@@ -1,0 +1,155 @@
+ I'm building a personal Type 1 Diabetes glucose digital twin for my own use only. This is a research/decision-support
+  project — the model will SUGGEST settings; I review every number and enter changes manually in my pump app (Loop).
+  Nothing is ever wired to autonomous dosing.
+
+  What I want
+  A learned, patient-specific forward simulator of my blood glucose dynamics — a "digital twin." Trained on my own
+  Nightscout history (CGM, treatments, profile). Given a sequence of insulin and carb inputs, it predicts BG forward in
+  time. Once trained:
+  - I can run COUNTERFACTUAL simulations: "what would my BG have looked like with ISF=42 instead of 50 from 4–8am on
+  these days?"
+  - I can extract per-hour ISF and per-hour CR by treating them as time-of-day functions inside the model and reading
+  off the learned values (or fitting them via gradient descent against held-out data).
+  - I get uncertainty bands, not just point estimates.
+
+  Approach
+  Neural ODE family specifically — pure Neural ODE, hybrid mechanistic-plus-neural-residual (Hovorka backbone + learned
+  correction), or latent ODE. Other architectures (transformers, S4, pure Bayesian regression, hierarchical regression)
+  are EXPLICITLY OUT OF SCOPE for this project — there are other tools for those. I want the digital-twin /
+  learned-dynamics line.
+
+  Background context
+  - I'm a DIY Looper (iOS Loop, Dexcom G7). Data archived in Nightscout at https://algerw.mooo.com via standard REST API
+  v1.
+  - I have ~5 days of data now, growing by 1 day per day.
+  - I am on Windows + WSL2, Docker available, Python 3.12+, prefer uv for env management.
+
+  Phase 1 — read and critique
+  Read chatgpt_feedback.txt and gemini_feedback.txt in the repo root — two independent deep-research surveys on this
+  topic from ChatGPT and Gemini deep-research modes. Critically evaluate BOTH:
+  - Where they agree — treat as higher-confidence.
+  - Where they disagree — flag the disagreement explicitly and recommend which side to take with your reasoning.
+  - Anything outdated, wrong, or overstated in either.
+  - Anything missing in both that's relevant to single-patient digital twins.
+  - Which library to commit to (torchdiffeq vs diffrax vs jaxley) and why.
+  - Whether to pretrain on a public dataset (T1DEXI, replayBG, UVA/Padova simulator) before fine-tuning on my data,
+  given I only have a few days.
+
+  End Phase 1 by proposing 2–3 concrete digital-twin architectures with tradeoffs and ASK ME to pick one before building
+  anything.
+
+  Phase 2 — build incrementally
+  After I pick an architecture:
+  1. Nightscout ingestion module (CGM + treatments + profile → tidy time-series).
+  2. Forward simulator FIRST (predicts BG given insulin and carb inputs) — no inverse problem yet.
+  3. Fit on a subset, validate on held-out days. Score with MAPE, RMSE, and clinical metrics (time-in-range error,
+  hypo-event precision/recall at the 70 mg/dL threshold).
+  4. Counterfactual API: given trained model + a real day, simulate the same day under proposed time-varying
+  ISF(t)/CR(t)/basal(t).
+  5. Inverse fit: extract per-hour ISF(t), CR(t), basal(t) posteriors (or point estimates with uncertainty from Monte
+  Carlo dropout / Laplace approximation / SWAG).
+  6. Markdown + JSON report generator: human-readable recommendations with credible intervals.
+
+  Commit at each working milestone.
+
+  Phase 2 additional features
+
+  A. Scenario simulator (interactive / "real-time" feel)
+  A function or CLI command that, given the current Nightscout state (last 4h of CGM + IOB + COB), takes a hypothetical
+  input — bolus amount, carb amount, time, or proposed ISF/CR override — and returns a predicted BG trajectory for the
+  next 1–6 hours with credible interval. This should run in <2s on a laptop. Implement as both a CLI subcommand and an
+  importable Python function I can call from a notebook.
+
+  B. Live polling daemon (optional, behind a flag)
+  A long-running process that polls Nightscout every N minutes, pulls new entries since the last seen timestamp, and:
+     1. Logs predicted vs actual BG (so we can see when the twin drifts from reality)
+     2. Appends to the training corpus
+     3. Does NOT update model weights in this loop — just collects data
+  Keep it stoppable, idempotent, and crash-safe (persist last-seen cursor to disk).
+
+  C. Nightly retraining (separate command, scheduled by me)
+  A `train-incremental` CLI command that retrains the model on the full accumulated history. Use proper held-out
+  validation on the latest 1–2 days. If validation worsens, save the new model alongside but keep the previous as
+  "current." Track all checkpoints with their validation scores and a timestamp.
+
+  D. Drift monitor (CLI report)
+  A `drift-report` command that shows: predicted-vs-actual error over the last 7 days, per hour of day. If any hour's
+  MAPE jumps suddenly, surface it — that's how I'll know the twin needs retraining, OR my physiology actually changed
+  (new infusion site, illness, stress).
+
+  These four features together give the "real-time, learning-as-it-goes" feel without the foot-guns of true online SGD.
+  Make sure the scenario simulator (A) uses the SAME forward model that's used for training — no separate code path, so
+  a bug in one shows up in the other.
+
+  Phase 2 backtest / "shadow mode" benchmark
+
+  The single most important deliverable. A `backtest` CLI command that:
+
+  1. Walks forward through my past data in chronological order. For each treatment event (bolus, carb entry, basal
+  change, exercise marker) the model predicts BG trajectories at multiple horizons (30 min, 1h, 2h, 4h) using ONLY data
+  from before that event. No future-leakage — train/predict cursor moves strictly forward.
+
+  2. For every prediction, logs:
+     - Event timestamp and type
+     - Inputs available at prediction time (CGM history, IOB, COB, time-of-day, recent treatments)
+     - Predicted BG point estimate + 50% and 90% credible intervals at each horizon
+     - Actual BG that occurred
+     - Errors: signed (predicted - actual), absolute, and percentage
+     - Whether actual fell inside each credible interval (for calibration)
+
+  3. Produces a multi-page Markdown report with:
+     a) Headline accuracy: MAPE / RMSE at each horizon, overall and by hour-of-day.
+     b) Calibration plot: if the model says "80% confidence," is the actual inside that interval ~80% of the time?
+  Calibration failures matter more than raw accuracy here.
+     c) Systematic error decomposition: does the twin consistently overshoot post-meal? Undershoot overnight? Miss
+  exercise dips? Break this out by event type (small meal vs large meal, high-fat vs low-fat if tagged, exercise vs
+  no-exercise).
+     d) Worst-prediction gallery: 10 events with largest absolute error, each with a chart showing predicted vs actual
+  BG and the relevant inputs. This is the gold for understanding what the twin doesn't know.
+     e) Per-day score: a single "twin quality" number per day so I can see if performance is improving as training data
+  grows.
+
+  4. A `shadow` subcommand that does (1)–(3) but only for the last 24h, runs fast, and can be invoked daily as a quick
+  health-check. Output: "Yesterday the twin's 2h prediction MAPE was 12% (last week's median: 15%). Worst miss: 6:45pm
+  dinner, predicted +40 mg/dL spike at 90min, actual +95. Likely cause: model underestimated this meal's carb absorption
+  rate."
+
+  5. The narrative cause-attribution in (4) is where Claude (the LLM) earns its keep at runtime — feed the worst-misses'
+  inputs + the model's internal state into an LLM call to produce the natural-language explanation. Keep this optional
+  and behind a flag (it costs tokens). Do NOT use the LLM as the predictor — that's the neural twin's job. The LLM is
+  just a narrator at the end of the pipeline.
+
+  6. Persistent benchmark log: every backtest run appends to a SQLite or parquet file so I can chart twin quality over
+  weeks. A `benchmark-trend` command plots this.
+
+  This is non-negotiable infrastructure — build it BEFORE the inverse problem (extracting per-hour ISF/CR). If the
+  twin's forward predictions aren't beating a sensible baseline (e.g., "BG stays where it is", or "linear extrapolation
+  from last 30min trend"), there's no point fitting ISF/CR off it. The backtest report should always compare the twin to
+  at least two trivial baselines so we know we're earning the complexity.
+
+  Hard constraints
+  - Personal-use single-user. No web UI / multi-tenant / auth complexity unless I ask for it later.
+  - Uncertainty is first-class. No bare point estimates for ISF/CR recommendations.
+  - No autonomous-dosing code, ever. Reports only.
+  - Reproducibility: pin versions, save model + config + training data hash alongside outputs.
+  - .env-based secrets, gitignored from commit 0.
+  - Clean enough to share publicly later.
+
+  GPU acceleration
+  - Target hardware: NVIDIA RTX 5070 Ti (Blackwell, sm_120) running in WSL2 on Windows 11.
+  - Verify Blackwell support in your chosen framework during Phase 1 — confirm
+    `torch.cuda.get_device_capability()` returns (12, 0) or equivalent JAX check. If JAX/diffrax has
+    compatibility gaps on Blackwell, default to PyTorch/torchdiffeq.
+  - Treat the GPU as an accelerator, not a requirement. Code paths should run correctly on CPU; the GPU is for
+    speedup on pretraining (if used), MC-sampling for uncertainty, hyperparameter sweeps, and the interactive
+    scenario simulator.
+  - The scenario simulator (Feature A) should target <200ms response time for a typical counterfactual query —
+    design the batched MC trajectory sampling with GPU in mind.
+
+  Open questions to ask me before going deep
+  1. Do I share my Nightscout URL/token with you now, or do I set up .env myself?
+  2. PyTorch (torchdiffeq) or JAX (diffrax) — your call after Phase 1, but tell me which and why.
+  3. Pretrain on a public dataset (T1DEXI / UVA-Padova simulator) before fine-tuning, given my small N? If so, recommend which.
+  4. CLI tool, notebook-first, or both?
+
+  Begin with Phase 1: critique the ChatGPT survey and propose architectures. Do not start writing implementation code until I pick.

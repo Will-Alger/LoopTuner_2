@@ -1,0 +1,76 @@
+Survey of Neural ODE and Learned-Dynamics Approaches for Patient-Specific T1D Glucose Modeling
+
+Building a personalized, differentiable forward simulator for T1D decision support is an ambitious and high-value project. The intersection of continuous-time deep learning (Neural ODEs/CDEs) and glucose dynamics has exploded over the last 3-4 years precisely because standard discrete sequence models (like Transformers or LSTMs) fail at the two things you care about most: irregular sampling (sensor noise, random meal times) and counterfactual reasoning ("what if I took 2 units instead of 3?"). 
+
+Here is a comprehensive 5-year briefing tailored to your single-user, Nightscout/Loop context.
+
+---
+
+### 1. Architecture Comparison Briefing
+
+The core challenge in T1D modeling is balancing predictive accuracy with physiological plausibility. Discrete models excel at the former but fail completely at the latter.
+
+| Architecture | Feasibility (Single Patient Data) | Library & Maintenance | Published Accuracy (RMSE @ 30m / 1h / 2h) | Counterfactual Support | Calibrated Uncertainty | Code / Repos |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Pure Neural ODE** (Black-box dG/dt = f_θ) | **Low:** Needs large data. Overfits easily on <30 days of data. | `torchdiffeq` (PyTorch), `diffrax` (JAX) - Both very active. | ~10 / ~18 / ~28 mg/dL | **Poor:** Learns correlations (insulin -> meals -> BG rise), often violating causality. | **Poor:** Requires bolt-on Bayesian layers (e.g., BNNs) which are unstable in ODEs. | Various repos, often stale or bespoke to papers. |
+| **Hybrid Mechanistic + Neural** (Mechanistic backbone + f_θ residual) | **High:** 14–30 days is often sufficient because the physics prior heavily restricts the search space. | `diffrax` (excellent for scientific ML) or SciML (Julia). | ~9 / ~16 / ~24 mg/dL | **Excellent:** Mechanistic core ensures physiological guardrails (insulin always lowers BG). | **Moderate:** Best achieved via ensemble training or stochastic residual terms. | See Zou et al. 2024/2026 (Hybrid NODE Causal Modeling). |
+| **Latent ODE / Variational ODE** | **Moderate:** Needs ~30-60 days to map irregular sequences to a smooth latent space. | `torchdiffeq`, `dynamax` (for state-space priors). | ~9 / ~15 / ~26 mg/dL | **Fair:** Better than pure NODE, but latent variables lack direct physical meaning. | **Good:** Variational formulation yields distributions, though often overconfident. | Latent ODE repos are plentiful, but specific T1D applications are rare. |
+| **Neural CDE / SDE** (Continuous inputs & stochasticity) | **Moderate:** SDEs capture sensor noise well. CDEs handle sparse meal/bolus events naturally. | `torchcde`, `torchsde` (PyTorch), `diffrax` (JAX). | ~8 / ~14 / ~23 mg/dL | **Moderate:** CDEs are great for continuous control, but still susceptible to causal confusion. | **Excellent:** (Specifically Neural SDEs or CDEs with Conformal Prediction). | GlucoNet-MM (2026) employs CDEs + Conformal Risk Control. |
+| **Discrete Sequence** (TFT, Transformer, S4) *(For Comparison)* | **High:** Very sample-efficient, highly optimized. | `neuralforecast`, `pytorch-forecasting`. | **Best:** ~8 / ~14 / ~20 mg/dL | **Zero:** Auto-regressive rollout diverges under hypothetical interventions. | **High:** Conformal prediction and quantile regression work perfectly here. | Highly maintained standard libraries. |
+
+---
+
+### 2. Extracting Interpretable ISF and CR
+
+If your critical requirement is the ability to extract time-of-day Insulin Sensitivity Factor (ISF) and Carb Ratio (CR) with credible intervals, **you cannot use a pure black-box approach.** * **Pure NODE / CDE:** ISF and CR do not exist in the model weights. To recover them, you would have to run computational sensitivity analyses (e.g., freeze the model, inject 1U of insulin, integrate the area under the curve of the glucose drop, and back-calculate ISF). This is highly computationally expensive and mathematically noisy.
+* **Hybrid Architectures:** This is where you need to be. By utilizing a hybrid system (like a Bergman minimal model or a Hovorka backbone), your ODE looks something like this:
+    dG(t)/dt = -S_I(t) * I_eff(t) * G(t) + K(t) * D_meal(t) + f_θ(X, t)
+    Here, S_I(t) (Insulin Sensitivity) and K(t) (Carb Absorption) can be output directly by a small neural network based on the time of day and heart rate, while f_θ captures the unknown residuals (stress, site degradation). You literally just read off S_I(t) to get your ISF. 
+* **Has it been done?** Yes. Recent papers (e.g., Zou et al., 2026, on structure-aware sparsification of hybrid NODEs) explicitly focus on learning these parameterized causal structures. In the digital twin space, physics-informed neural networks (PINNs) have been used to fit these specific parameters. 
+
+---
+
+### 3. Public Datasets and Pretraining
+
+For someone with 5–60 days of data, **pretraining is absolutely mandatory** if you use any neural architecture. Without it, the model will learn that insulin *causes* glucose to rise (since boluses are followed by meal spikes in your data).
+
+| Dataset | Size | License/Access | Relevance to Loop + G7 Setup |
+| :--- | :--- | :--- | :--- |
+| **OhioT1DM** | ~12 patients, 8 weeks each | DUC (Data Use Agreement) via PhysioNet | **High:** Includes CGM, insulin, carbs, and some physiological data. The standard benchmark. |
+| **T1DEXI** | ~400 individuals | Application required via Vivli | **Medium:** Massive scale and includes exercise, but strict academic access walls. |
+| **UVA/Padova (simglucose)** | Infinite (Simulator) | Commercial (but open-source Python ports exist) | **High:** Generate infinite synthetic patients to pretrain your mechanistic/hybrid priors before fine-tuning on your data. |
+| **DCLP3 / GLYFE** | ~20-30 patients | DUC usually required | **Medium:** Often used for testing discrete models in standard benchmarks. |
+
+*Protocol:* Pretrain your model on a synthetic cohort generated by an open-source UVA/Padova simulator (like `simglucose` in Python). This forces the neural network to learn the fundamental laws of insulin/carb dynamics. Then, fine-tune the model on your personal 5-60 days of Nightscout data.
+
+---
+
+### 4. Prior Art: What NOT to Reinvent
+
+The open-source T1D community is incredibly active, but largely relies on heuristics rather than deep learning.
+
+* **AAPS AutoISF / dynISF:** These are **not** neural networks. They are advanced, algorithmic heuristic rule-sets. They use moving averages of glucose derivatives, current IOB, and expected absorption to scale your basal/ISF dynamically. They are incredibly effective for real-time reactive looping, but they are not predictive, differentiable forward-simulators.
+* **OpenAPS oref0 autotune:** This uses an iterative, hill-climbing optimization algorithm. It looks retrospectively at nights and periods without meals, calculates the deviation from expected BG, and nudges Basal, ISF, and CR by a maximum of 20-30% to minimize the error. It is simple math, not machine learning.
+* **replayBG (Padova Group):** This is a MATLAB-based digital twin methodology (Cappon et al., 2023). It identifies a patient-specific model to simulate alternative therapies. It uses conventional system-identification and optimization, not neural ODEs. It is great for validation but cumbersome to integrate into a modern Python/JAX deep learning stack.
+* **GLYFE Benchmark:** A standardized benchmark for glucose forecasting. Most winning models are discrete (Transformers/LSTMs), highlighting why the academic focus on RMSE limits counterfactual utility.
+
+---
+
+### 5. Recommendations for Your Specific Build
+
+Since you need counterfactual capabilities, interpretable ISF/CR, and calibrated uncertainty from ~60 days of data, here is your playbook:
+
+**1. The Architecture: JAX-based Hybrid Neural ODE**
+Use JAX and the `diffrax` library (written by Patrick Kidger, the author of `torchcde` and heavily optimized for scientific ML). 
+* **Backbone:** Implement a simplified compartmental model (like the 2-compartment insulin absorption model Loop uses) as your ODE base.
+* **Neural Component:** Train a multi-layer perceptron (MLP) to output S_I(t) (your ISF proxy) and CR(t) based on circadian time (sine/cosine of hour) and day of the week. 
+* **Residual:** Add a neural residual term to soak up what the mechanistic math misses. 
+
+**2. Handling Uncertainty: Conformal Prediction**
+Do not bother with Bayesian Neural Networks; they are a nightmare to tune inside ODE solvers. Instead, use **Conformal Prediction** (or Conformal Risk Control, as seen in 2026 literature like *GlucoNet-MM*). Conformal prediction acts as a wrapper around your trained simulator. You run a calibration set of your Nightscout data through the trained model, and it gives you mathematically guaranteed predictive intervals (e.g., "90% chance BG will be between 95 and 130").
+
+**3. The Pretraining Pipeline**
+Generate 100 virtual patients using a Python implementation of the UVA/Padova simulator. Train your hybrid ODE on this synthetic data first. This ensures the model learns that insulin drives BG down. Only then, freeze the core mechanistic weights and fine-tune the time-of-day MLP on your 60 days of real Dexcom/Loop data.
+
+**A Pitfall to Avoid:**
+Do not interpolate your bolus and carbohydrate data into a smooth continuous curve. Boluses are impulses (Dirac deltas). If you smooth them, the ODE solver will struggle. Treat continuous signals (CGM) differently from event-based impulses (insulin/carbs) using jump-diffusion or event-handling functions in your solver.
