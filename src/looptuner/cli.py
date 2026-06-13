@@ -530,6 +530,90 @@ def checkpoints():
     console.print(table)
 
 
+@app.command()
+def daemon(
+    interval_min: float = typer.Option(5.0, help="Polling interval (minutes)."),
+    horizons: str = typer.Option("30,60", help="Forecast horizons to log (min)."),
+    backfill_days: int = typer.Option(7, help="Days to backfill on first run."),
+    max_polls: int = typer.Option(0, help="Stop after N polls (0 = run until Ctrl+C)."),
+):
+    """Poll Nightscout, append to the corpus, log predicted-vs-actual. No weight updates."""
+    from looptuner.daemon import DaemonPaths, run_daemon
+    from looptuner.scenario import calibrate_conformal
+
+    settings = Settings.load()
+    if not settings.nightscout_url:
+        console.print("[red]NIGHTSCOUT_URL not set — fill in .env first.[/]")
+        raise typer.Exit(1)
+    model_path = settings.runs_dir / MODEL_FILE
+    if not model_path.exists():
+        console.print("[red]No trained model — run `train` first.[/]")
+        raise typer.Exit(1)
+
+    from looptuner.ingest.nightscout import NightscoutClient
+
+    client = NightscoutClient(
+        settings.nightscout_url, token=settings.nightscout_token,
+        api_secret=settings.nightscout_api_secret,
+    )
+    sim = ForwardSimulator.load(str(model_path))
+    paths = DaemonPaths(settings.data_dir, settings.runs_dir)
+
+    # Calibrate conformal once from the existing cached dataset, if present.
+    conformal = None
+    try:
+        conformal = calibrate_conformal(sim, load_dataset(paths.dataset))
+    except Exception:
+        pass
+
+    horizons_min = tuple(int(x) for x in horizons.split(","))
+    console.print(
+        f"[green]Daemon started[/] (every {interval_min:g} min). "
+        "Collecting data + logging predictions; weights are NOT updated. Ctrl+C to stop."
+    )
+
+    def on_poll(s):
+        if "error" in s:
+            console.print(f"[yellow]poll error:[/] {s['error']}")
+        else:
+            console.print(
+                f"  {s['now'][:19]}  +{s['new_entries']}cgm/+{s['new_treatments']}tx  "
+                f"corpus {s['corpus_days']}d  resolved {s['resolved']}  pending {s['pending']}"
+            )
+
+    run_daemon(
+        client, sim, paths, interval_min=interval_min, horizons_min=horizons_min,
+        conformal=conformal, backfill_days=backfill_days,
+        max_polls=max_polls or None, on_poll=on_poll,
+    )
+    client.close()
+    console.print("[green]Daemon stopped.[/] State persisted; safe to resume anytime.")
+
+
+@app.command(name="daemon-status")
+def daemon_status():
+    """Summarize the daemon's predicted-vs-actual log."""
+    import numpy as np
+
+    settings = Settings.load()
+    from looptuner.daemon import DaemonPaths
+
+    paths = DaemonPaths(settings.data_dir, settings.runs_dir)
+    if not paths.predictions.exists():
+        console.print("[yellow]No live predictions yet — run `daemon` first.[/]")
+        raise typer.Exit(0)
+    df = pd.read_parquet(paths.predictions)
+    table = Table(title=f"Live predicted-vs-actual ({len(df)} resolved)")
+    for c in ("Horizon", "n", "MAPE%", "RMSE", "90% coverage"):
+        table.add_column(c)
+    for h, g in df.groupby("horizon_min"):
+        mape = float((g["abs_err"] / g["actual"].clip(lower=1) * 100).mean())
+        rmse = float(np.sqrt(((g["pred"] - g["actual"]) ** 2).mean()))
+        cov = float(g["in90"].mean()) * 100
+        table.add_row(f"{int(h)}m", str(len(g)), f"{mape:.1f}", f"{rmse:.1f}", f"{cov:.0f}%")
+    console.print(table)
+
+
 @app.command(name="drift-report")
 def drift_report(
     horizon_min: int = typer.Option(60, help="Horizon to monitor (min)."),

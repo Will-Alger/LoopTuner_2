@@ -103,4 +103,8 @@ Phase 2, building incrementally:
 - [x] Backtest polish: worst-miss trajectory PNGs (`backtest --gallery`) + optional
       LLM narrator (`--narrate`, behind a flag — the LLM is a narrator at the end of
       the pipeline, never the predictor)
-- [ ] Live polling daemon (optional, behind a flag)
+- [x] Live polling daemon (`daemon` / `daemon-status`) — polls Nightscout, appends to
+      the corpus, logs predicted-vs-actual; crash-safe cursor, idempotent, stoppable.
+      Never updates weights (that's `train-incremental`'s job).
+
+**All Phase 2 features from the spec are now implemented.**
