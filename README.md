@@ -67,6 +67,7 @@ Phase 2, building incrementally:
 - [x] Forward simulator (hybrid Neural ODE) — beats persistence & linear baselines
       at every horizon on both synthetic and real data
 - [x] Train / held-out validation + metrics (MAPE, RMSE, clinical)
+- [x] CLI (`ingest` / `train` / `evaluate`) + reproducible dataset cache & provenance
 - [ ] Backtest / shadow-mode harness (built *before* the inverse problem)
 - [ ] Counterfactual + scenario simulator
 - [ ] Inverse fit: per-hour ISF(t)/CR(t) with uncertainty
